@@ -1,0 +1,76 @@
+version: "3.8"
+
+x-common: &common
+  build: .
+  env_file: .env
+  restart: unless-stopped
+  volumes:
+    - ./data:/app/data
+    - ./logs:/app/logs
+    - ./model_artifacts:/app/model_artifacts
+    - ./reports:/app/reports
+
+services:
+  # ── Main bot (dry-run by default) ──────────────────────────────────
+  bot:
+    <<: *common
+    container_name: polybot
+    environment:
+      - BOT_MODE=dry-run
+      - DRY_RUN=true
+      - ENABLE_LIVE_TRADING=false
+      - LIVE_TRADING_ACKNOWLEDGED=false
+    ports:
+      - "${HEALTH_PORT:-8880}:8880"
+    command: ["bot"]
+
+  # ── Backtest runner (one-shot) ─────────────────────────────────────
+  backtest:
+    <<: *common
+    container_name: polybot-backtest
+    restart: "no"
+    environment:
+      - BOT_MODE=backtest
+      - DRY_RUN=true
+    profiles:
+      - tools
+    command: ["backtest"]
+
+  # ── Replay runner (one-shot) ───────────────────────────────────────
+  replay:
+    <<: *common
+    container_name: polybot-replay
+    restart: "no"
+    environment:
+      - BOT_MODE=replay
+      - DRY_RUN=true
+    profiles:
+      - tools
+    command: ["replay", "--input", "/app/data/session.jsonl"]
+
+  # ── NLP replay (one-shot) ──────────────────────────────────────────
+  nlp-replay:
+    <<: *common
+    container_name: polybot-nlp-replay
+    restart: "no"
+    environment:
+      - BOT_MODE=replay
+      - DRY_RUN=true
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    profiles:
+      - tools
+    command: ["nlp-replay"]
+
+  # ── Model training (one-shot) ──────────────────────────────────────
+  train:
+    <<: *common
+    container_name: polybot-train
+    restart: "no"
+    environment:
+      - BOT_MODE=train
+      - DRY_RUN=true
+    profiles:
+      - tools
+    command: ["train"]

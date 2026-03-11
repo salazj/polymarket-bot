@@ -1,0 +1,49 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.pyo
+.venv
+venv
+.env
+*.egg-info
+dist
+build
+
+# IDE
+.vscode
+.idea
+.cursor
+*.swp
+*.swo
+.DS_Store
+
+# Data (mounted at runtime, not baked into image)
+polybot.db
+*.db
+data/
+logs/
+reports/
+model_artifacts/
+
+# Tests and docs (not needed in production image)
+tests/
+docs/
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage
+
+# Docker
+docker-compose*.yml
+Dockerfile
+
+# Security: never include secrets
+.env
+.env.*
+!.env.example
+EMERGENCY_STOP
