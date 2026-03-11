@@ -49,35 +49,98 @@ app/
 
 ---
 
-## Quick Start (Docker)
+## Quick Start (Pre-Built Image)
+
+The fastest way to deploy — no build step, no source code needed.
+
+### Prerequisites
+
+- Docker 20.10+
+
+### 1. Set up
+
+```bash
+mkdir polymarket-bot && cd polymarket-bot
+mkdir -p data logs model_artifacts reports
+
+# Download the example env file
+curl -sO https://raw.githubusercontent.com/salazj/polymarket-bot/main/.env.example
+cp .env.example .env
+# Edit .env with your settings (all secrets go here)
+```
+
+### 2. Pull and run
+
+```bash
+docker pull ghcr.io/salazj/polymarket-bot:latest
+
+docker run -d --name polybot \
+  --env-file .env \
+  -v ./data:/app/data \
+  -v ./logs:/app/logs \
+  -v ./model_artifacts:/app/model_artifacts \
+  -v ./reports:/app/reports \
+  -p 8880:8880 \
+  ghcr.io/salazj/polymarket-bot:latest
+```
+
+### 3. Check status
+
+```bash
+docker logs -f polybot
+curl http://localhost:8880/health
+```
+
+### 4. Stop
+
+```bash
+docker stop polybot && docker rm polybot
+```
+
+### 5. Update to latest version
+
+```bash
+docker pull ghcr.io/salazj/polymarket-bot:latest
+docker stop polybot && docker rm polybot
+# Re-run the docker run command from step 2
+```
+
+---
+
+## Quick Start (Docker Compose)
+
+For running multiple services (backtest, replay, training) alongside the bot.
 
 ### Prerequisites
 
 - Docker 20.10+
 - Docker Compose v2+
 
-### 1. Configure
+### 1. Clone and configure
 
 ```bash
+git clone https://github.com/salazj/polymarket-bot.git
+cd polymarket-bot
 cp .env.example .env
 # Edit .env with your settings (all secrets go here, never in the image)
 ```
 
-### 2. Build
-
-```bash
-docker compose build
-```
-
-### 3. Run in dry-run mode (safe default)
+### 2. Run (pulls pre-built image automatically)
 
 ```bash
 docker compose up bot
 ```
 
+To build from source instead of pulling the image:
+
+```bash
+docker compose build
+docker compose up bot
+```
+
 The bot starts with `DRY_RUN=true` and `ENABLE_LIVE_TRADING=false`. No real orders are placed.
 
-### 4. Run other services
+### 3. Run other services
 
 ```bash
 # Backtest a strategy
@@ -93,14 +156,14 @@ docker compose run --rm nlp-replay
 docker compose run --rm train --synthetic
 ```
 
-### 5. View health
+### 4. View health
 
 ```bash
 curl http://localhost:8880/health
 curl http://localhost:8880/metrics
 ```
 
-### 6. Stop
+### 5. Stop
 
 ```bash
 docker compose down
@@ -301,7 +364,13 @@ The LLM outputs a JSON object that is parsed into a `ClassificationResult`. When
 
 ## Docker Commands Reference
 
-### Build
+### Pull Pre-Built Image
+
+```bash
+docker pull ghcr.io/salazj/polymarket-bot:latest
+```
+
+### Build from Source (optional)
 
 ```bash
 docker compose build
@@ -389,30 +458,37 @@ The startup banner will show `*** LIVE TRADING IS ENABLED ***` when all gates ar
 
 ## Cloud Deployment
 
-### Deploy to a VPS (Ubuntu)
+### Deploy to a VPS (Ubuntu / Oracle Linux / any Linux)
 
 ```bash
 # 1. Install Docker
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
+newgrp docker
 
-# 2. Clone the project
-git clone <your-repo-url> polymarket-bot
-cd polymarket-bot
+# 2. Set up
+mkdir polymarket-bot && cd polymarket-bot
+mkdir -p data logs model_artifacts reports
 
 # 3. Configure
+curl -sO https://raw.githubusercontent.com/salazj/polymarket-bot/main/.env.example
 cp .env.example .env
 nano .env  # set your credentials and desired mode
 
-# 4. Create data directories
-mkdir -p data logs model_artifacts reports
+# 4. Pull and start (no build needed)
+docker pull ghcr.io/salazj/polymarket-bot:latest
+docker run -d --name polybot \
+  --restart unless-stopped \
+  --env-file .env \
+  -v ./data:/app/data \
+  -v ./logs:/app/logs \
+  -v ./model_artifacts:/app/model_artifacts \
+  -v ./reports:/app/reports \
+  -p 8880:8880 \
+  ghcr.io/salazj/polymarket-bot:latest
 
-# 5. Build and start
-docker compose build
-docker compose up -d bot
-
-# 6. Monitor
-docker compose logs -f bot
+# 5. Monitor
+docker logs -f polybot
 curl http://localhost:8880/health
 ```
 
