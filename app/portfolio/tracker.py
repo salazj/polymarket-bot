@@ -4,23 +4,23 @@ Portfolio Tracker
 Manages cash, positions, entry prices, realized PnL, and unrealized PnL.
 Correctly handles Yes and No positions for binary outcome markets.
 Supports mark-to-market from current best bid/ask.
+
+Positions are keyed by instrument_id (exchange-agnostic identifier).
 """
 
 from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime
 from pathlib import Path
 
 from app.config.settings import Settings
 from app.data.models import (
     Order,
-    OrderStatus,
+    OutcomeSide,
     Position,
     PortfolioSnapshot,
     Side,
-    TokenSide,
 )
 from app.monitoring import get_logger
 from app.utils.helpers import utc_now
@@ -35,7 +35,7 @@ class PortfolioTracker:
         self._settings = settings
         self._cash = starting_cash if starting_cash is not None else 100.0
         self._initial_cash = self._cash
-        self._positions: dict[str, Position] = {}  # keyed by token_id
+        self._positions: dict[str, Position] = {}  # keyed by instrument_id
         self._realized_pnl = 0.0
         self._daily_realized_pnl = 0.0
         self._daily_start_equity: float | None = None
@@ -51,12 +51,11 @@ class PortfolioTracker:
         with self._lock:
             return list(self._positions.values())
 
-    def get_position(self, token_id: str) -> Position | None:
+    def get_position(self, instrument_id: str) -> Position | None:
         with self._lock:
-            return self._positions.get(token_id)
+            return self._positions.get(instrument_id)
 
     def get_snapshot(self) -> PortfolioSnapshot:
-        """Build a point-in-time portfolio snapshot for risk/strategy use."""
         with self._lock:
             positions = list(self._positions.values())
             total_exposure = sum(p.notional for p in positions)
@@ -81,14 +80,9 @@ class PortfolioTracker:
         """
         Process a fill event. Updates positions, cash, and PnL.
         Returns realized PnL for this fill (0 for buys).
-
-        For BUY: we spend cash and acquire tokens.
-        For SELL: we receive cash and reduce token holdings.
-
-        IMPORTANT: PnL is computed from avg_entry_price BEFORE the position
-        is reduced, so the entry price used is always correct.
         """
         realized = 0.0
+        iid = order.instrument_id or order.token_id
         with self._lock:
             cost = fill_price * fill_size
 
@@ -98,7 +92,7 @@ class PortfolioTracker:
                         "fill_exceeds_cash",
                         cost=cost,
                         cash=self._cash,
-                        token_id=order.token_id,
+                        instrument_id=iid,
                     )
                 self._cash -= cost
                 self._add_to_position(order, fill_price, fill_size)
@@ -110,7 +104,7 @@ class PortfolioTracker:
 
         logger.info(
             "fill_processed",
-            token_id=order.token_id,
+            instrument_id=iid,
             side=order.side.value,
             price=fill_price,
             size=fill_size,
@@ -120,18 +114,18 @@ class PortfolioTracker:
         return realized
 
     def _add_to_position(self, order: Order, price: float, size: float) -> None:
-        """Add to an existing position or create a new one."""
-        pos = self._positions.get(order.token_id)
+        iid = order.instrument_id or order.token_id
+        pos = self._positions.get(iid)
         if pos is None:
-            token_side = TokenSide.YES  # default; caller should set properly
             pos = Position(
                 market_id=order.market_id,
-                token_id=order.token_id,
-                token_side=token_side,
+                token_id=iid,
+                instrument_id=iid,
+                exchange=order.exchange,
+                token_side=OutcomeSide.YES,
             )
-            self._positions[order.token_id] = pos
+            self._positions[iid] = pos
 
-        # Update weighted average entry price
         old_notional = pos.size * pos.avg_entry_price
         new_notional = size * price
         pos.size += size
@@ -140,10 +134,10 @@ class PortfolioTracker:
         pos.updated_at = utc_now()
 
     def _remove_from_position(self, order: Order, price: float, size: float) -> float:
-        """Remove from position, return realized PnL."""
-        pos = self._positions.get(order.token_id)
+        iid = order.instrument_id or order.token_id
+        pos = self._positions.get(iid)
         if pos is None:
-            logger.warning("sell_without_position", token_id=order.token_id)
+            logger.warning("sell_without_position", instrument_id=iid)
             return 0.0
 
         realized = (price - pos.avg_entry_price) * min(size, pos.size)
@@ -152,14 +146,13 @@ class PortfolioTracker:
         pos.updated_at = utc_now()
 
         if pos.size <= 0:
-            del self._positions[order.token_id]
+            del self._positions[iid]
 
         return realized
 
-    def mark_to_market(self, token_id: str, mark_price: float) -> None:
-        """Update unrealized PnL for a position using current market price."""
+    def mark_to_market(self, instrument_id: str, mark_price: float) -> None:
         with self._lock:
-            pos = self._positions.get(token_id)
+            pos = self._positions.get(instrument_id)
             if pos is None:
                 return
             pos.last_mark_price = mark_price
@@ -167,7 +160,6 @@ class PortfolioTracker:
             pos.updated_at = utc_now()
 
     def start_new_day(self) -> None:
-        """Reset daily tracking. Call at the start of each trading day."""
         with self._lock:
             equity = self._cash + sum(p.market_value for p in self._positions.values())
             self._daily_start_equity = equity
@@ -176,34 +168,40 @@ class PortfolioTracker:
 
     def restore_position(
         self,
-        token_id: str,
-        market_id: str,
-        token_side: TokenSide,
-        size: float,
-        avg_entry_price: float,
-        realized_pnl: float,
+        token_id: str = "",
+        market_id: str = "",
+        token_side: OutcomeSide = OutcomeSide.YES,
+        size: float = 0.0,
+        avg_entry_price: float = 0.0,
+        realized_pnl: float = 0.0,
+        *,
+        instrument_id: str = "",
+        exchange: str = "",
     ) -> None:
         """Restore a single position from persistent storage on startup."""
+        iid = instrument_id or token_id
         with self._lock:
             pos = Position(
                 market_id=market_id,
-                token_id=token_id,
+                token_id=iid,
+                instrument_id=iid,
+                exchange=exchange,
                 token_side=token_side,
                 size=size,
                 avg_entry_price=avg_entry_price,
                 realized_pnl=realized_pnl,
             )
-            self._positions[token_id] = pos
+            self._positions[iid] = pos
             self._realized_pnl += realized_pnl
         logger.info(
             "position_restored",
-            token_id=token_id,
+            instrument_id=iid,
+            exchange=exchange,
             size=size,
             avg_entry=avg_entry_price,
         )
 
     def export_summary(self, path: Path | None = None) -> dict:
-        """Export portfolio summary as a dict (and optionally to JSON file)."""
         snap = self.get_snapshot()
         summary = {
             "timestamp": snap.timestamp.isoformat(),

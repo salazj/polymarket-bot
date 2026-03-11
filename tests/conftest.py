@@ -8,10 +8,12 @@ import pytest
 
 from app.config.settings import Settings
 from app.data.models import (
+    Exchange,
     MarketFeatures,
     Order,
     OrderbookSnapshot,
     OrderStatus,
+    OutcomeSide,
     PortfolioSnapshot,
     Position,
     PriceLevel,

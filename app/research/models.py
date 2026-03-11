@@ -1,5 +1,5 @@
 """
-Model training wrappers for the Polymarket ML pipeline.
+Model training wrappers for the prediction-market ML pipeline.
 
 Trains baseline tabular classifiers (logistic regression, gradient boosting,
 random forest) behind a uniform interface.  Walk-forward cross-validation
@@ -7,7 +7,7 @@ selects hyperparameters; the final model is retrained on the full train+val
 set before test evaluation.
 
 No deep learning.  Deliberately conservative defaults to resist overfitting
-on small datasets typical of Polymarket feature histories.
+on small datasets typical of prediction-market feature histories.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class TrainedModel:
 def _get_model_configs() -> dict[str, dict[str, Any]]:
     """Return conservative model configs.
 
-    Regularisation is intentionally strong.  Polymarket feature datasets
+    Regularisation is intentionally strong.  Prediction-market feature datasets
     are typically small (hundreds to low-thousands of rows), so the primary
     risk is overfitting, not underfitting.
     """

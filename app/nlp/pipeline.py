@@ -146,7 +146,7 @@ class NlpPipeline:
                 source_provider=item.source,
                 source_timestamp=item.timestamp,
                 text_snippet=clean_text[:200],
-                market_ids=[m.market.condition_id],
+                market_ids=[m.market.market_id or m.market.condition_id],
                 relevance=m.relevance_score,
                 sentiment=result.sentiment,
                 sentiment_score=result.sentiment_score,
@@ -200,13 +200,17 @@ class NlpPipeline:
 
 def nlp_signal_to_layered(
     signal: NlpSignal,
-    token_id: str,
+    token_id: str = "",
+    *,
+    instrument_id: str = "",
+    exchange: str = "",
 ) -> NormalizedSignal:
     """Convert an NlpSignal to a NormalizedSignal for the decision engine.
 
     The NLP pipeline generates *structured signals*, not trade orders.
     The decision engine evaluates them alongside L1 and L2 signals.
     """
+    iid = instrument_id or token_id
     if signal.sentiment == SentimentDirection.BULLISH:
         action = SignalAction.BUY_YES
         direction = 1
@@ -224,7 +228,9 @@ def nlp_signal_to_layered(
         layer=IntelligenceLayer.NLP,
         source_name=f"nlp:{signal.source_provider}",
         market_id=signal.market_ids[0] if signal.market_ids else "",
-        token_id=token_id,
+        token_id=iid,
+        instrument_id=iid,
+        exchange=exchange,
         action=action,
         direction=direction,
         raw_confidence=raw_conf,

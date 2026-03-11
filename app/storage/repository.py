@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS markets (
     active INTEGER DEFAULT 1,
     minimum_order_size REAL DEFAULT 1.0,
     minimum_tick_size REAL DEFAULT 0.01,
+    exchange TEXT DEFAULT 'polymarket',
     fetched_at TEXT NOT NULL
 );
 
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS raw_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
     token_id TEXT,
+    exchange TEXT DEFAULT 'polymarket',
     payload TEXT NOT NULL,
     received_at TEXT NOT NULL
 );
@@ -48,6 +50,7 @@ CREATE TABLE IF NOT EXISTS features (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
+    exchange TEXT DEFAULT 'polymarket',
     timestamp TEXT NOT NULL,
     data_json TEXT NOT NULL
 );
@@ -57,6 +60,7 @@ CREATE TABLE IF NOT EXISTS signals (
     strategy_name TEXT NOT NULL,
     market_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
+    exchange TEXT DEFAULT 'polymarket',
     action TEXT NOT NULL,
     confidence REAL,
     suggested_price REAL,
@@ -69,6 +73,7 @@ CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT PRIMARY KEY,
     market_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
+    exchange TEXT DEFAULT 'polymarket',
     side TEXT NOT NULL,
     price REAL NOT NULL,
     size REAL NOT NULL,
@@ -93,6 +98,7 @@ CREATE TABLE IF NOT EXISTS positions (
     token_id TEXT PRIMARY KEY,
     market_id TEXT NOT NULL,
     token_side TEXT NOT NULL,
+    exchange TEXT DEFAULT 'polymarket',
     size REAL DEFAULT 0,
     avg_entry_price REAL DEFAULT 0,
     realized_pnl REAL DEFAULT 0,
@@ -238,10 +244,10 @@ class Repository:
         await self._db.execute(
             """INSERT OR REPLACE INTO markets
                (condition_id, question, slug, tokens_json, end_date, active,
-                minimum_order_size, minimum_tick_size, fetched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                minimum_order_size, minimum_tick_size, exchange, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                market.condition_id,
+                market.condition_id or market.market_id,
                 market.question,
                 market.slug,
                 json.dumps([t.model_dump() for t in market.tokens]),
@@ -249,6 +255,7 @@ class Repository:
                 int(market.active),
                 market.minimum_order_size,
                 market.minimum_tick_size,
+                market.exchange,
                 datetime.utcnow().isoformat(),
             ),
         )
@@ -320,13 +327,14 @@ class Repository:
         assert self._db is not None
         await self._db.execute(
             """INSERT INTO signals
-               (strategy_name, market_id, token_id, action, confidence,
-                suggested_price, suggested_size, rationale, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (strategy_name, market_id, token_id, exchange, action,
+                confidence, suggested_price, suggested_size, rationale, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 signal.strategy_name,
                 signal.market_id,
-                signal.token_id,
+                signal.instrument_id or signal.token_id,
+                signal.exchange,
                 signal.action.value,
                 signal.confidence,
                 signal.suggested_price,
@@ -343,13 +351,15 @@ class Repository:
         assert self._db is not None
         await self._db.execute(
             """INSERT OR REPLACE INTO orders
-               (order_id, market_id, token_id, side, price, size, filled_size,
-                status, exchange_order_id, signal_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (order_id, market_id, token_id, exchange, side, price, size,
+                filled_size, status, exchange_order_id, signal_id,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 order.order_id,
                 order.market_id,
-                order.token_id,
+                order.instrument_id or order.token_id,
+                order.exchange,
                 order.side.value,
                 order.price,
                 order.size,
@@ -392,18 +402,19 @@ class Repository:
     async def save_position(self, position: Any) -> None:
         """Upsert a position (keyed by token_id)."""
         assert self._db is not None
-        from app.data.models import Position  # local import to avoid circular
+        from app.data.models import Position
 
         p: Position = position
         await self._db.execute(
             """INSERT OR REPLACE INTO positions
-               (token_id, market_id, token_side, size, avg_entry_price,
-                realized_pnl, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (token_id, market_id, token_side, exchange, size,
+                avg_entry_price, realized_pnl, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                p.token_id,
+                p.instrument_id or p.token_id,
                 p.market_id,
                 p.token_side.value,
+                p.exchange,
                 p.size,
                 p.avg_entry_price,
                 p.realized_pnl,

@@ -51,17 +51,27 @@ class Settings(BaseSettings):
     # Third gate: explicit acknowledgement required for live trading
     live_trading_acknowledged: bool = False
 
+    # --- Exchange Selection ---
+    exchange: str = "polymarket"
+
     # --- Polymarket API ---
     polymarket_host: str = "https://clob.polymarket.com"
     polymarket_ws_host: str = "wss://ws-subscriptions-clob.polymarket.com/ws"
     chain_id: int = 137
 
-    # --- Wallet / Auth ---
+    # --- Wallet / Auth (Polymarket) ---
     # SECURITY: These fields are excluded from repr/logging via model_config.
     private_key: str = ""
     poly_api_key: str = ""
     poly_api_secret: str = ""
     poly_passphrase: str = ""
+
+    # --- Kalshi API ---
+    kalshi_api_key: str = ""
+    kalshi_private_key_path: str = ""
+    kalshi_base_url: str = "https://trading-api.kalshi.com/trade-api/v2"
+    kalshi_ws_url: str = "wss://trading-api.kalshi.com/trade-api/ws/v2"
+    kalshi_demo_mode: bool = True
 
     # --- Risk Limits ---
     max_position_per_market: float = Field(default=10.0, ge=0)
@@ -137,6 +147,15 @@ class Settings(BaseSettings):
             raise ValueError(f"log_level must be one of {allowed}")
         return v
 
+    @field_validator("exchange")
+    @classmethod
+    def validate_exchange(cls, v: str) -> str:
+        allowed = {"polymarket", "kalshi"}
+        v = v.lower()
+        if v not in allowed:
+            raise ValueError(f"exchange must be one of {allowed}")
+        return v
+
     @field_validator("llm_provider")
     @classmethod
     def validate_llm_provider(cls, v: str) -> str:
@@ -187,8 +206,18 @@ class Settings(BaseSettings):
         )
 
     @property
-    def has_credentials(self) -> bool:
+    def has_polymarket_credentials(self) -> bool:
         return bool(self.private_key and self.poly_api_key and self.poly_api_secret)
+
+    @property
+    def has_kalshi_credentials(self) -> bool:
+        return bool(self.kalshi_api_key and self.kalshi_private_key_path)
+
+    @property
+    def has_credentials(self) -> bool:
+        if self.exchange == "kalshi":
+            return self.has_kalshi_credentials
+        return self.has_polymarket_credentials
 
     def require_live_trading(self) -> None:
         """Raise unless all live-trading preconditions are met (3 gates)."""
@@ -205,10 +234,16 @@ class Settings(BaseSettings):
                 "This is a deliberate third safety gate."
             )
         if not self.has_credentials:
-            raise RuntimeError(
-                "Live trading requires PRIVATE_KEY, POLY_API_KEY, POLY_API_SECRET, "
-                "and POLY_PASSPHRASE to be set in .env"
-            )
+            if self.exchange == "kalshi":
+                raise RuntimeError(
+                    "Kalshi live trading requires KALSHI_API_KEY and "
+                    "KALSHI_PRIVATE_KEY_PATH to be set in .env"
+                )
+            else:
+                raise RuntimeError(
+                    "Polymarket live trading requires PRIVATE_KEY, POLY_API_KEY, "
+                    "POLY_API_SECRET, and POLY_PASSPHRASE to be set in .env"
+                )
 
     def require_credentials(self) -> None:
         """Backwards-compatible alias — delegates to full check."""
@@ -216,7 +251,10 @@ class Settings(BaseSettings):
 
     def __repr__(self) -> str:
         """Override repr to redact secrets."""
-        _SECRETS = {"private_key", "poly_api_key", "poly_api_secret", "poly_passphrase", "llm_api_key"}
+        _SECRETS = {
+            "private_key", "poly_api_key", "poly_api_secret", "poly_passphrase",
+            "llm_api_key", "kalshi_api_key", "kalshi_private_key_path",
+        }
         safe_fields = {
             k: ("***" if k in _SECRETS and v else v)
             for k, v in self.__dict__.items()

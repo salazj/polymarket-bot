@@ -1,5 +1,5 @@
 """
-Research and ML pipeline for Polymarket short-horizon edge prediction.
+Research and ML pipeline for short-horizon prediction-market edge detection.
 
 Modules:
   targets        – prediction target construction

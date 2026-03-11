@@ -1,5 +1,5 @@
 """
-Prediction target construction for short-horizon Polymarket trading.
+Prediction target construction for short-horizon prediction-market trading.
 
 Two target definitions, both derived from forward-looking mid-price changes:
 
@@ -17,7 +17,7 @@ ASSUMPTIONS (make explicit so reviewers can challenge them):
 - We assume the trader can get filled at the current best ask for a BUY
   and best bid for a SELL.  In practice, fill probability and queue
   position matter — we ignore them in v1.
-- Round-trip fee is a fixed constant (default 0.02 = 2 cents).  Polymarket
+- Round-trip fee is a fixed constant (default 0.02 = 2 cents).  Polymarket/Kalshi
   currently charges 0 taker fee on most markets, but this may change.
 """
 

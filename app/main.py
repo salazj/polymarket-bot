@@ -1,8 +1,11 @@
 """
-Main entry point for the Polymarket trading bot.
+Main entry point for the trading bot.
 
 Wires together all modules and runs the main trading loop in the
 configured mode (dry_run, live, backtest, replay).
+
+Exchange-agnostic: uses the adapter factory to instantiate the
+correct exchange adapter based on the EXCHANGE config setting.
 """
 
 from __future__ import annotations
@@ -13,16 +16,15 @@ from typing import Any
 
 import click
 
-from app.clients.rest_client import PolymarketRestClient
-from app.clients.trading_client import TradingClient
-from app.clients.ws_client import PolymarketWSClient
 from app.config.settings import Settings, get_settings
 from app.data.features import FeatureEngine
-from app.data.models import Market, MarketFeatures, Side, Signal, TokenSide, TradingMode, Trade
+from app.data.models import Market, MarketFeatures, Side, Signal, Trade, TradingMode
 from app.data.orderbook import OrderbookManager
 from app.decision.engine import DecisionEngine, signal_to_normalized
 from app.decision.ensemble import DecisionMode, EnsembleConfig
 from app.decision.signals import IntelligenceLayer, NormalizedSignal
+from app.exchanges import build_exchange_adapter
+from app.exchanges.base import BaseExchangeAdapter
 from app.execution.engine import ExecutionEngine
 from app.monitoring import get_logger, setup_logging
 from app.monitoring.health import HealthServer
@@ -57,13 +59,13 @@ class TradingBot:
         self._mode = TradingMode.DRY_RUN if self._settings.dry_run else TradingMode.LIVE
         self._running = False
 
+        # Exchange adapter (Polymarket or Kalshi)
+        self._adapter: BaseExchangeAdapter = build_exchange_adapter(self._settings)
+
         # Core components
-        self._rest_client = PolymarketRestClient(self._settings)
-        self._ws_client = PolymarketWSClient(self._settings)
-        self._trading_client = TradingClient(self._settings)
         self._risk_manager = RiskManager(self._settings)
         self._portfolio = PortfolioTracker(self._settings)
-        self._execution = ExecutionEngine(self._settings, self._trading_client, self._risk_manager)
+        self._execution = ExecutionEngine(self._settings, self._adapter.execution, self._risk_manager)
         self._risk_manager.set_cancel_all_callback(self._execution.cancel_all_orders)
         self._repository = Repository(self._settings.database_url)
         self._orderbook = OrderbookManager()
@@ -95,7 +97,7 @@ class TradingBot:
             except Exception:
                 logger.warning("strategy_init_failed", name=name)
 
-        # Level 2: ML strategy (also in L1 list; we extract its signal separately)
+        # Level 2: ML strategy
         self._ml_strategy: BaseStrategy | None = None
         for s in self._l1_strategies:
             if s.name == "event_probability_model":
@@ -115,15 +117,14 @@ class TradingBot:
         self._health_server = HealthServer(
             portfolio_snapshot_fn=self._portfolio.get_snapshot,
             is_halted_fn=lambda: self._risk_manager.is_halted,
-            ws_connected_fn=lambda: self._ws_client.is_connected,
+            ws_connected_fn=lambda: self._adapter.websocket.is_connected,
         )
 
         # Markets to trade
         self._active_markets: list[Market] = []
-        self._token_to_market: dict[str, Market] = {}
+        self._instrument_to_market: dict[str, Market] = {}
 
     def _build_nlp_pipeline(self) -> NlpPipeline:
-        """Build the NLP pipeline with optional LLM classifier."""
         llm = build_llm_classifier(
             provider=self._settings.llm_provider,
             model_name=self._settings.llm_model_name,
@@ -164,11 +165,11 @@ class TradingBot:
             self._news_service.register_provider(MockProvider())
 
     async def start(self, market_slugs: list[str] | None = None) -> None:
-        """Initialize and run the bot."""
         strategy_names = [s.name for s in self._l1_strategies]
         logger.info(
             "bot_starting",
             mode=self._mode.value,
+            exchange=self._settings.exchange,
             strategies=strategy_names,
             dry_run=self._settings.dry_run,
             llm_provider=self._settings.llm_provider,
@@ -176,8 +177,8 @@ class TradingBot:
 
         await self._repository.initialize()
 
-        # Fetch markets
-        all_markets = await self._rest_client.get_all_markets()
+        # Fetch markets via exchange adapter
+        all_markets = await self._adapter.market_data.get_all_markets()
         if market_slugs:
             self._active_markets = [m for m in all_markets if m.slug in market_slugs]
         else:
@@ -187,44 +188,48 @@ class TradingBot:
             logger.error("no_active_markets_found")
             return
 
-        # Build token mapping and feature engines
-        token_ids: list[str] = []
+        # Build instrument mapping and feature engines
+        instrument_ids: list[str] = []
         for market in self._active_markets:
             await self._repository.save_market(market)
             for token in market.tokens:
-                token_ids.append(token.token_id)
-                self._token_to_market[token.token_id] = market
-                self._feature_engines[token.token_id] = FeatureEngine(
-                    market.condition_id, token.token_id
+                iid = token.instrument_id or token.token_id
+                instrument_ids.append(iid)
+                self._instrument_to_market[iid] = market
+                self._feature_engines[iid] = FeatureEngine(
+                    market.market_id,
+                    instrument_id=iid,
+                    exchange=self._settings.exchange,
                 )
 
         logger.info(
             "markets_loaded",
             count=len(self._active_markets),
-            tokens=len(token_ids),
+            instruments=len(instrument_ids),
         )
 
         # Fetch initial orderbook snapshots via REST
-        for token_id in token_ids:
+        for iid in instrument_ids:
             try:
-                book_data = await self._rest_client.get_orderbook(token_id)
-                market = self._token_to_market[token_id]
+                book_data = await self._adapter.market_data.get_orderbook(iid)
+                market = self._instrument_to_market[iid]
                 self._orderbook.apply_snapshot(
-                    market_id=market.condition_id,
-                    token_id=token_id,
+                    market_id=market.market_id,
+                    instrument_id=iid,
                     bids=book_data.get("bids", []),
                     asks=book_data.get("asks", []),
                 )
             except Exception as e:
-                logger.warning("initial_book_fetch_failed", token_id=token_id, error=str(e))
+                logger.warning("initial_book_fetch_failed", instrument_id=iid, error=str(e))
 
         # Subscribe to WebSocket feeds
-        self._ws_client.subscribe_book(token_ids)
-        self._ws_client.subscribe_trades(token_ids)
-        self._ws_client.subscribe_user()
-        self._ws_client.on("book", self._on_book_message)
-        self._ws_client.on("trade", self._on_trade_message)
-        self._ws_client.on("user", self._on_user_message)
+        ws = self._adapter.websocket
+        ws.subscribe_book(instrument_ids)
+        ws.subscribe_trades(instrument_ids)
+        ws.subscribe_user()
+        ws.on("book", self._on_book_message)
+        ws.on("trade", self._on_trade_message)
+        ws.on("user", self._on_user_message)
 
         # Recover positions from previous session
         await self._recover_positions()
@@ -236,22 +241,20 @@ class TradingBot:
         await self._health_server.start()
         self._running = True
         await asyncio.gather(
-            self._ws_client.connect(),
+            ws.connect(),
             self._intelligence_loop(),
             self._housekeeping_loop(),
             self._news_service.start(),
         )
 
     async def stop(self) -> None:
-        """Graceful shutdown: persist positions, cancel orders, close connections."""
         logger.info("bot_stopping")
         self._running = False
         await self._news_service.stop()
         await self._health_server.stop()
         await self._execution.cancel_all_orders()
         await self._persist_positions()
-        await self._ws_client.disconnect()
-        await self._rest_client.close()
+        await self._adapter.close()
 
         summary = self._portfolio.export_summary(
             self._settings.reports_dir / "final_portfolio.json"
@@ -260,7 +263,6 @@ class TradingBot:
         await self._repository.close()
 
     async def _persist_positions(self) -> None:
-        """Save all current positions to the database."""
         try:
             positions = self._portfolio.positions
             await self._repository.save_all_positions(positions)
@@ -269,14 +271,14 @@ class TradingBot:
             logger.error("position_persist_failed", error=str(e))
 
     async def _recover_positions(self) -> None:
-        """Restore open positions from the database on startup."""
         try:
             rows = await self._repository.load_positions()
             for row in rows:
+                from app.data.models import OutcomeSide
                 self._portfolio.restore_position(
                     token_id=row["token_id"],
                     market_id=row["market_id"],
-                    token_side=TokenSide(row["token_side"]),
+                    token_side=OutcomeSide(row["token_side"]),
                     size=row["size"],
                     avg_entry_price=row["avg_entry_price"],
                     realized_pnl=row["realized_pnl"],
@@ -289,59 +291,58 @@ class TradingBot:
     # ── WebSocket Handlers ─────────────────────────────────────────────
 
     async def _on_book_message(self, msg: dict[str, Any]) -> None:
-        """Handle orderbook snapshot or delta from WebSocket."""
         assets = msg.get("assets", [])
         for asset in assets if isinstance(assets, list) else [msg]:
-            token_id = asset.get("asset_id", asset.get("token_id", ""))
-            if not token_id or token_id not in self._token_to_market:
+            iid = asset.get("instrument_id", asset.get("asset_id", asset.get("token_id", asset.get("market_ticker", ""))))
+            if not iid or iid not in self._instrument_to_market:
                 continue
 
-            market = self._token_to_market[token_id]
+            market = self._instrument_to_market[iid]
             bids = asset.get("bids", [])
             asks = asset.get("asks", [])
 
             if asset.get("type") == "snapshot" or len(bids) > 5:
-                self._orderbook.apply_snapshot(market.condition_id, token_id, bids, asks)
+                self._orderbook.apply_snapshot(market_id=market.market_id, instrument_id=iid, bids=bids, asks=asks)
             else:
-                self._orderbook.apply_delta(token_id, bids, asks)
+                self._orderbook.apply_delta(instrument_id=iid, bid_updates=bids, ask_updates=asks)
 
-            await self._repository.save_raw_event("book", token_id, asset)
+            await self._repository.save_raw_event("book", iid, asset)
 
     async def _on_trade_message(self, msg: dict[str, Any]) -> None:
-        """Handle trade messages from WebSocket."""
         trades = msg.get("trades", msg.get("data", []))
         if not isinstance(trades, list):
             trades = [msg]
 
         for t in trades:
-            token_id = t.get("asset_id", t.get("token_id", ""))
-            if not token_id or token_id not in self._feature_engines:
+            iid = t.get("instrument_id", t.get("asset_id", t.get("token_id", t.get("market_ticker", ""))))
+            if not iid or iid not in self._feature_engines:
                 continue
 
+            market = self._instrument_to_market.get(iid)
             trade = Trade(
-                market_id=self._token_to_market.get(token_id, Market(condition_id="", question="")).condition_id,
-                token_id=token_id,
+                market_id=market.market_id if market else "",
+                token_id=iid,
+                instrument_id=iid,
+                exchange=self._settings.exchange,
                 price=float(t.get("price", 0)),
-                size=float(t.get("size", 0)),
-                side=Side.BUY if t.get("side", "").upper() == "BUY" else Side.SELL,
+                size=float(t.get("size", t.get("count", 0))),
+                side=Side.BUY if t.get("side", "").upper() in ("BUY", "YES") else Side.SELL,
             )
-            self._feature_engines[token_id].add_trade(trade)
-            await self._repository.save_raw_event("trade", token_id, t)
+            self._feature_engines[iid].add_trade(trade)
+            await self._repository.save_raw_event("trade", iid, t)
 
     async def _on_user_message(self, msg: dict[str, Any]) -> None:
-        """Handle user-level order/fill updates from the exchange."""
         event = msg.get("event", msg.get("type", ""))
 
         if event in ("fill", "order_fill", "trade_fill"):
             await self._process_exchange_fill(msg)
-        elif event in ("order_update", "order"):
+        elif event in ("order_update", "order", "order_group_updates"):
             self._process_order_update(msg)
 
     async def _process_exchange_fill(self, msg: dict[str, Any]) -> None:
-        """Process an exchange-reported fill: update execution, portfolio, risk."""
         order_id = msg.get("order_id", msg.get("orderId", ""))
         fill_price = float(msg.get("price", 0))
-        fill_size = float(msg.get("size", msg.get("matchSize", 0)))
+        fill_size = float(msg.get("size", msg.get("matchSize", msg.get("count", 0))))
 
         if not order_id or fill_price <= 0 or fill_size <= 0:
             logger.warning("invalid_fill_message", msg=str(msg)[:300])
@@ -372,7 +373,6 @@ class TradingBot:
         )
 
     def _process_order_update(self, msg: dict[str, Any]) -> None:
-        """Sync order status from exchange notifications."""
         from app.data.models import OrderStatus
 
         order_id = msg.get("order_id", msg.get("orderId", ""))
@@ -383,39 +383,38 @@ class TradingBot:
             self._execution.update_order_status(order_id, new_status)
 
     async def _reconcile_positions(self) -> None:
-        """Compare local positions with exchange to detect drift.
-
-        Logs warnings on mismatch — does NOT auto-correct, because the local
-        state may be more recent than the exchange response (in-flight fills).
-        """
         try:
-            exchange_positions = await self._trading_client.get_open_positions()
+            exchange_positions = await self._adapter.execution.get_open_positions()
             if not exchange_positions:
                 return
 
-            exchange_map = {p["token_id"]: p for p in exchange_positions}
+            exchange_map = {
+                p.get("instrument_id", p.get("token_id", "")): p
+                for p in exchange_positions
+            }
             local_positions = self._portfolio.positions
 
             for pos in local_positions:
-                ex = exchange_map.pop(pos.token_id, None)
+                pid = pos.instrument_id or pos.token_id
+                ex = exchange_map.pop(pid, None)
                 if ex is None:
                     logger.warning(
                         "position_drift_local_only",
-                        token_id=pos.token_id,
+                        instrument_id=pid,
                         local_size=pos.size,
                     )
                 elif abs(pos.size - float(ex.get("size", 0))) > 0.01:
                     logger.warning(
                         "position_drift_size_mismatch",
-                        token_id=pos.token_id,
+                        instrument_id=pid,
                         local_size=pos.size,
                         exchange_size=ex.get("size"),
                     )
 
-            for token_id, ex in exchange_map.items():
+            for pid, ex in exchange_map.items():
                 logger.warning(
                     "position_drift_exchange_only",
-                    token_id=token_id,
+                    instrument_id=pid,
                     exchange_size=ex.get("size"),
                 )
         except Exception as e:
@@ -424,15 +423,6 @@ class TradingBot:
     # ── Core Loops ─────────────────────────────────────────────────────
 
     async def _intelligence_loop(self) -> None:
-        """Three-layer intelligence evaluation on each tracked token.
-
-        L1: All rule-based strategies
-        L2: ML prediction model
-        L3: NLP/event signals from the news ingestion service
-
-        Signals are combined by the DecisionEngine into a TradeCandidate
-        which passes through risk and execution independently.
-        """
         while self._running:
             await asyncio.sleep(5.0)
 
@@ -440,12 +430,11 @@ class TradingBot:
                 logger.warning("trading_halted_by_risk")
                 continue
 
-            # Collect any pending L3 signals from news ingestion
             pending_nlp = self._news_service.get_latest_signals()
 
-            for token_id, engine in self._feature_engines.items():
+            for iid, engine in self._feature_engines.items():
                 try:
-                    book = self._orderbook.get_snapshot(token_id)
+                    book = self._orderbook.get_snapshot(iid)
                     if book is None:
                         continue
 
@@ -455,16 +444,16 @@ class TradingBot:
                     await self._repository.save_features(features)
 
                     if features.mid_price is not None:
-                        self._portfolio.mark_to_market(token_id, features.mid_price)
+                        self._portfolio.mark_to_market(iid, features.mid_price)
 
-                    market = self._token_to_market.get(token_id)
-                    market_id = market.condition_id if market else features.market_id
+                    market = self._instrument_to_market.get(iid)
+                    market_id = market.market_id if market else features.market_id
 
                     # ── Level 1: Rule strategies ──
                     l1_signals: list[NormalizedSignal] = []
                     for strat in self._l1_strategies:
                         if strat is self._ml_strategy:
-                            continue  # ML runs as L2
+                            continue
                         try:
                             sig = strat.generate_signal(features, portfolio_snap)
                             if sig is not None:
@@ -491,26 +480,29 @@ class TradingBot:
                     for nlp_sig in pending_nlp:
                         if market_id in nlp_sig.market_ids:
                             l3_signals.append(
-                                nlp_signal_to_layered(nlp_sig, token_id)
+                                nlp_signal_to_layered(nlp_sig, instrument_id=iid, exchange=self._settings.exchange)
                             )
 
                     # ── Decision Engine ──
                     candidate, trace = self._decision_engine.evaluate(
                         market_id=market_id,
-                        token_id=token_id,
+                        token_id=iid,
                         features=features,
                         portfolio=portfolio_snap,
                         l1_signals=l1_signals,
                         l2_signals=l2_signals,
                         l3_signals=l3_signals,
+                        instrument_id=iid,
+                        exchange=self._settings.exchange,
                     )
 
-                    # Persist all layer signals
                     for ls in l1_signals + l2_signals + l3_signals:
                         sig = Signal(
                             strategy_name=ls.source_name,
                             market_id=ls.market_id,
-                            token_id=ls.token_id,
+                            token_id=ls.instrument_id or ls.token_id,
+                            instrument_id=ls.instrument_id or ls.token_id,
+                            exchange=ls.exchange or self._settings.exchange,
                             action=ls.action,
                             confidence=ls.confidence,
                             suggested_price=ls.suggested_price,
@@ -522,11 +514,12 @@ class TradingBot:
                     if candidate.blocked or candidate.action.value == "HOLD":
                         continue
 
-                    # Convert candidate to Signal for execution pipeline
                     exec_signal = Signal(
                         strategy_name="decision_engine",
                         market_id=candidate.market_id,
                         token_id=candidate.token_id,
+                        instrument_id=candidate.token_id,
+                        exchange=self._settings.exchange,
                         action=candidate.action,
                         confidence=candidate.final_confidence,
                         suggested_price=candidate.suggested_price,
@@ -540,19 +533,16 @@ class TradingBot:
                         await self._repository.save_order(order)
 
                 except Exception as e:
-                    logger.error("intelligence_loop_error", token_id=token_id, error=str(e))
+                    logger.error("intelligence_loop_error", instrument_id=iid, error=str(e))
                     metrics.increment("intelligence_loop_errors")
 
     async def _housekeeping_loop(self) -> None:
-        """Periodic maintenance: stale order cleanup, PnL snapshots, metrics."""
         while self._running:
             await asyncio.sleep(60.0)
 
             try:
-                # Cancel stale orders
                 await self._execution.cancel_stale_orders(max_age_seconds=300)
 
-                # PnL snapshot
                 snap = self._portfolio.get_snapshot()
                 await self._repository.save_pnl_snapshot(
                     cash=snap.cash,
@@ -562,11 +552,9 @@ class TradingBot:
                     daily_pnl=snap.daily_pnl,
                 )
 
-                # Flush buffered DB writes and persist positions
                 await self._repository.flush()
                 await self._persist_positions()
 
-                # Log metrics
                 m = metrics.snapshot()
                 logger.info(
                     "periodic_metrics",
@@ -577,15 +565,13 @@ class TradingBot:
                     **{k: v for k, v in m.items() if v > 0},
                 )
 
-                # Reconcile positions against exchange (live mode only)
                 if self._mode == TradingMode.LIVE:
                     await self._reconcile_positions()
 
-                # Check for stale WebSocket data
-                if self._ws_client.is_stale:
+                if self._adapter.websocket.is_stale:
                     logger.warning(
                         "ws_data_stale",
-                        seconds=self._ws_client.seconds_since_last_message,
+                        seconds=self._adapter.websocket.seconds_since_last_message,
                     )
 
             except Exception as e:
@@ -599,12 +585,15 @@ class TradingBot:
 @click.option("--markets", "-m", multiple=True, help="Market slugs to trade (default: top 5 active)")
 @click.option("--strategy", "-s", default=None, help="Strategy name override")
 @click.option("--dry-run/--live", default=True, help="Dry run (default) or live trading")
-def main(markets: tuple[str, ...], strategy: str | None, dry_run: bool) -> None:
-    """Start the Polymarket trading bot."""
+@click.option("--exchange", "-e", default=None, help="Exchange: polymarket or kalshi")
+def main(markets: tuple[str, ...], strategy: str | None, dry_run: bool, exchange: str | None) -> None:
+    """Start the trading bot."""
     settings = get_settings()
 
     if strategy:
         settings.strategy = strategy
+    if exchange:
+        settings.exchange = exchange
     if not dry_run:
         settings.dry_run = False
         settings.require_live_trading()

@@ -118,47 +118,48 @@ class ReplayPlayer:
 
     def _handle_book_snapshot(self, event: ReplayEvent) -> None:
         d = event.data
-        token_id = d["token_id"]
+        iid = d.get("instrument_id", d.get("token_id", ""))
         market_id = d.get("market_id", "")
         self._orderbook.apply_snapshot(
             market_id=market_id,
-            token_id=token_id,
+            instrument_id=iid,
             bids=d.get("bids", []),
             asks=d.get("asks", []),
         )
-        self._maybe_generate_signal(token_id, market_id)
+        self._maybe_generate_signal(iid, market_id)
 
     def _handle_book_delta(self, event: ReplayEvent) -> None:
         d = event.data
-        token_id = d["token_id"]
+        iid = d.get("instrument_id", d.get("token_id", ""))
         self._orderbook.apply_delta(
-            token_id=token_id,
+            instrument_id=iid,
             bid_updates=d.get("bids"),
             ask_updates=d.get("asks"),
         )
 
     def _handle_trade(self, event: ReplayEvent) -> None:
         d = event.data
-        token_id = d["token_id"]
+        iid = d.get("instrument_id", d.get("token_id", ""))
         market_id = d.get("market_id", "")
 
         trade = Trade(
             market_id=market_id,
-            token_id=token_id,
+            token_id=iid,
+            instrument_id=iid,
             price=float(d["price"]),
             size=float(d["size"]),
             side=Side(d.get("side", "BUY")),
         )
 
-        engine = self._get_feature_engine(market_id, token_id)
+        engine = self._get_feature_engine(market_id, iid)
         engine.add_trade(trade)
 
-    def _maybe_generate_signal(self, token_id: str, market_id: str) -> None:
-        book = self._orderbook.get_snapshot(token_id)
+    def _maybe_generate_signal(self, instrument_id: str, market_id: str) -> None:
+        book = self._orderbook.get_snapshot(instrument_id)
         if book is None:
             return
 
-        engine = self._get_feature_engine(market_id, token_id)
+        engine = self._get_feature_engine(market_id, instrument_id)
         features = engine.compute(book)
         portfolio_snap = self._portfolio.get_snapshot()
 
@@ -173,10 +174,10 @@ class ReplayPlayer:
                 "rationale": signal.rationale,
             })
 
-    def _get_feature_engine(self, market_id: str, token_id: str) -> FeatureEngine:
-        if token_id not in self._feature_engines:
-            self._feature_engines[token_id] = FeatureEngine(market_id, token_id)
-        return self._feature_engines[token_id]
+    def _get_feature_engine(self, market_id: str, instrument_id: str) -> FeatureEngine:
+        if instrument_id not in self._feature_engines:
+            self._feature_engines[instrument_id] = FeatureEngine(market_id, instrument_id=instrument_id)
+        return self._feature_engines[instrument_id]
 
     def save_results(self, results: dict[str, Any], output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)

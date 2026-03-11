@@ -5,7 +5,7 @@ Converts approved signals into orders with comprehensive safety checks.
 Manages order lifecycle (state machine), deduplication, and cancel/replace logic.
 
 Invariants enforced:
-- No duplicate orders for the same market+side+price
+- No duplicate orders for the same instrument+side+price
 - No orders when data is stale
 - No orders if any risk check fails
 - All decisions are logged
@@ -15,10 +15,8 @@ Invariants enforced:
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from app.clients.trading_client import TradingClient
 from app.config.settings import Settings
 from app.data.models import (
     MarketFeatures,
@@ -29,6 +27,7 @@ from app.data.models import (
     Signal,
     SignalAction,
 )
+from app.exchanges.base import BaseExecutionClient
 from app.monitoring import get_logger
 from app.monitoring.logger import metrics
 from app.utils.helpers import generate_order_id, round_price, round_size, utc_now
@@ -38,7 +37,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Maps signal actions to order side
 ACTION_SIDE_MAP: dict[SignalAction, Side] = {
     SignalAction.BUY_YES: Side.BUY,
     SignalAction.BUY_NO: Side.BUY,
@@ -55,11 +53,11 @@ class ExecutionEngine:
     def __init__(
         self,
         settings: Settings,
-        trading_client: TradingClient,
+        execution_client: BaseExecutionClient,
         risk_manager: RiskManager,
     ) -> None:
         self._settings = settings
-        self._trading_client = trading_client
+        self._execution_client = execution_client
         self._risk = risk_manager
         self._active_orders: dict[str, Order] = {}
         self._order_history: list[Order] = []
@@ -81,10 +79,6 @@ class ExecutionEngine:
         features: MarketFeatures,
         portfolio: PortfolioSnapshot,
     ) -> Order | None:
-        """
-        Main entry point: validate signal, run risk checks, place order if approved.
-        Returns the Order object or None if rejected.
-        """
         if signal.action == SignalAction.HOLD:
             return None
 
@@ -97,7 +91,6 @@ class ExecutionEngine:
             logger.warning("unknown_signal_action", action=signal.action)
             return None
 
-        # Validate price and size
         price = round_price(signal.suggested_price or 0.0)
         size = round_size(signal.suggested_size or self._settings.default_order_size)
 
@@ -111,15 +104,14 @@ class ExecutionEngine:
             metrics.increment("orders_rejected_invalid_size")
             return None
 
-        # Deduplication: reject if we already have an active order at same market+side+price
-        if self._is_duplicate(signal.token_id, side, price):
-            logger.debug("duplicate_order_skipped", token_id=signal.token_id, side=side, price=price)
+        instrument_id = signal.instrument_id or signal.token_id
+        if self._is_duplicate(instrument_id, side, price):
+            logger.debug("duplicate_order_skipped", instrument_id=instrument_id, side=side, price=price)
             metrics.increment("orders_rejected_duplicate")
             return None
 
-        # Risk checks
         risk_result = self._risk.check_order(
-            token_id=signal.token_id,
+            instrument_id=instrument_id,
             side=side,
             price=price,
             size=size,
@@ -131,17 +123,18 @@ class ExecutionEngine:
             logger.warning(
                 "order_rejected_by_risk",
                 reason=risk_result.reason,
-                token_id=signal.token_id,
+                instrument_id=instrument_id,
                 strategy=signal.strategy_name,
             )
             metrics.increment("orders_rejected_risk")
             return None
 
-        # Build and place order
         order = Order(
             order_id=generate_order_id(),
             market_id=signal.market_id,
-            token_id=signal.token_id,
+            token_id=instrument_id,
+            instrument_id=instrument_id,
+            exchange=signal.exchange,
             side=side,
             price=price,
             size=size,
@@ -152,6 +145,7 @@ class ExecutionEngine:
             "submitting_order",
             order_id=order.order_id,
             market_id=order.market_id,
+            exchange=order.exchange,
             side=order.side.value,
             price=order.price,
             size=order.size,
@@ -160,7 +154,7 @@ class ExecutionEngine:
             rationale=signal.rationale,
         )
 
-        order = await self._trading_client.place_order(order)
+        order = await self._execution_client.place_order(order)
 
         with self._lock:
             self._active_orders[order.order_id] = order
@@ -179,23 +173,21 @@ class ExecutionEngine:
         if order is None or order.is_terminal:
             return None
 
-        order = await self._trading_client.cancel_order(order)
+        order = await self._execution_client.cancel_order(order)
         logger.info("order_canceled", order_id=order.order_id)
         return order
 
     async def cancel_all_orders(self) -> int:
-        """Cancel all active orders. Returns count of orders canceled."""
         active = self.active_orders
         count = 0
         for order in active:
-            result = await self._trading_client.cancel_order(order)
+            result = await self._execution_client.cancel_order(order)
             if result.status == OrderStatus.CANCELED:
                 count += 1
         logger.info("canceled_all_orders", count=count)
         return count
 
     async def cancel_stale_orders(self, max_age_seconds: float = 300) -> int:
-        """Cancel orders older than max_age_seconds."""
         now = utc_now()
         count = 0
         for order in self.active_orders:
@@ -208,7 +200,6 @@ class ExecutionEngine:
         return count
 
     def update_order_status(self, order_id: str, new_status: OrderStatus, filled_size: float = 0) -> None:
-        """Update order state from exchange callbacks."""
         with self._lock:
             order = self._active_orders.get(order_id)
             if order is None:
@@ -225,12 +216,12 @@ class ExecutionEngine:
             filled=order.filled_size,
         )
 
-    def _is_duplicate(self, token_id: str, side: Side, price: float) -> bool:
+    def _is_duplicate(self, instrument_id: str, side: Side, price: float) -> bool:
         with self._lock:
             for o in self._active_orders.values():
                 if (
                     not o.is_terminal
-                    and o.token_id == token_id
+                    and (o.instrument_id == instrument_id or o.token_id == instrument_id)
                     and o.side == side
                     and abs(o.price - price) < 0.001
                 ):

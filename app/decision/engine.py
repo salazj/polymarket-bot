@@ -86,11 +86,14 @@ def signal_to_normalized(
     """Convert a legacy ``Signal`` into a ``NormalizedSignal``."""
     direction = _action_direction(signal.action)
     normed = normalize_confidence(signal.confidence, layer)
+    iid = signal.instrument_id or signal.token_id
     return NormalizedSignal(
         layer=layer,
         source_name=signal.strategy_name,
         market_id=signal.market_id,
-        token_id=signal.token_id,
+        token_id=iid,
+        instrument_id=iid,
+        exchange=signal.exchange,
         action=signal.action,
         direction=direction,
         raw_confidence=signal.confidence,
@@ -124,12 +127,15 @@ class DecisionEngine:
     def evaluate(
         self,
         market_id: str,
-        token_id: str,
-        features: MarketFeatures,
-        portfolio: PortfolioSnapshot,
-        l1_signals: list[NormalizedSignal],
-        l2_signals: list[NormalizedSignal],
-        l3_signals: list[NormalizedSignal],
+        token_id: str = "",
+        features: MarketFeatures | None = None,
+        portfolio: PortfolioSnapshot | None = None,
+        l1_signals: list[NormalizedSignal] | None = None,
+        l2_signals: list[NormalizedSignal] | None = None,
+        l3_signals: list[NormalizedSignal] | None = None,
+        *,
+        instrument_id: str = "",
+        exchange: str = "",
     ) -> tuple[TradeCandidate, DecisionTrace]:
         """Run the full ensemble pipeline.
 
@@ -137,12 +143,15 @@ class DecisionEngine:
         decides what to do with the candidate.  The trace is a complete
         audit record.
         """
+        iid = instrument_id or token_id
         candidate, trace = run_ensemble(
             market_id=market_id,
-            token_id=token_id,
-            l1_signals=l1_signals,
-            l2_signals=l2_signals,
-            l3_signals=l3_signals,
+            token_id=iid,
+            instrument_id=iid,
+            exchange=exchange,
+            l1_signals=l1_signals or [],
+            l2_signals=l2_signals or [],
+            l3_signals=l3_signals or [],
             config=self._config,
         )
 

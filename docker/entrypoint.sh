@@ -19,7 +19,10 @@ DRY_RUN="${DRY_RUN:-true}"
 ENABLE_LIVE_TRADING="${ENABLE_LIVE_TRADING:-false}"
 LIVE_TRADING_ACKNOWLEDGED="${LIVE_TRADING_ACKNOWLEDGED:-false}"
 
+EXCHANGE="${EXCHANGE:-polymarket}"
+
 echo "=============================================="
+echo "  Exchange: ${EXCHANGE}"
 echo "  Mode:     ${BOT_MODE}"
 echo "  Dry Run:  ${DRY_RUN}"
 echo "  Live:     ${ENABLE_LIVE_TRADING}"
@@ -38,10 +41,18 @@ if [ "${DRY_RUN}" = "false" ] && [ "${ENABLE_LIVE_TRADING}" = "true" ] && [ "${L
     echo "  Real orders WILL be submitted."
     echo ""
 
-    if [ -z "${PRIVATE_KEY:-}" ] || [ -z "${POLY_API_KEY:-}" ]; then
-        echo "ERROR: Live trading requires PRIVATE_KEY and POLY_API_KEY."
-        echo "       Set them in your .env file or environment."
-        exit 1
+    if [ "${EXCHANGE}" = "kalshi" ]; then
+        if [ -z "${KALSHI_API_KEY:-}" ] || [ -z "${KALSHI_PRIVATE_KEY_PATH:-}" ]; then
+            echo "ERROR: Kalshi live trading requires KALSHI_API_KEY and KALSHI_PRIVATE_KEY_PATH."
+            echo "       Set them in your .env file or environment."
+            exit 1
+        fi
+    else
+        if [ -z "${PRIVATE_KEY:-}" ] || [ -z "${POLY_API_KEY:-}" ]; then
+            echo "ERROR: Polymarket live trading requires PRIVATE_KEY and POLY_API_KEY."
+            echo "       Set them in your .env file or environment."
+            exit 1
+        fi
     fi
 else
     echo ""

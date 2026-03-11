@@ -210,19 +210,30 @@ def detect_conflict(
 
 def run_ensemble(
     market_id: str,
-    token_id: str,
-    l1_signals: list[NormalizedSignal],
-    l2_signals: list[NormalizedSignal],
-    l3_signals: list[NormalizedSignal],
-    config: EnsembleConfig,
+    token_id: str = "",
+    l1_signals: list[NormalizedSignal] | None = None,
+    l2_signals: list[NormalizedSignal] | None = None,
+    l3_signals: list[NormalizedSignal] | None = None,
+    config: EnsembleConfig | None = None,
+    *,
+    instrument_id: str = "",
+    exchange: str = "",
 ) -> tuple[TradeCandidate, DecisionTrace]:
     """Full ensemble pipeline.  Returns (candidate, trace).
 
     Every step writes into the DecisionTrace so the caller can inspect
     exactly what happened and why.
     """
+    l1_signals = l1_signals or []
+    l2_signals = l2_signals or []
+    l3_signals = l3_signals or []
+    config = config or EnsembleConfig()
+    iid = instrument_id or token_id
     now = utc_now()
-    trace = DecisionTrace(market_id=market_id, token_id=token_id, timestamp=now)
+    trace = DecisionTrace(
+        market_id=market_id, token_id=iid, instrument_id=iid,
+        exchange=exchange, timestamp=now,
+    )
     vetoes: list[Veto] = []
 
     total_weight = config.weight_l1 + config.weight_l2 + config.weight_l3
@@ -403,7 +414,9 @@ def run_ensemble(
 
     candidate = TradeCandidate(
         market_id=market_id,
-        token_id=token_id,
+        token_id=iid,
+        instrument_id=iid,
+        exchange=exchange,
         action=action,
         final_confidence=confidence,
         expected_edge=net_edge,

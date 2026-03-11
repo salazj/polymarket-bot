@@ -71,14 +71,24 @@ class RiskManager:
 
     def check_order(
         self,
-        token_id: str,
-        side: Side,
-        price: float,
-        size: float,
-        features: MarketFeatures,
-        portfolio: PortfolioSnapshot,
+        instrument_id: str = "",
+        side: Side = Side.BUY,
+        price: float = 0.0,
+        size: float = 0.0,
+        features: MarketFeatures | None = None,
+        portfolio: PortfolioSnapshot | None = None,
+        *,
+        token_id: str = "",
     ) -> RiskCheckResult:
-        """Run all risk checks. Returns approved=True only if ALL pass."""
+        """Run all risk checks. Returns approved=True only if ALL pass.
+
+        ``instrument_id`` is the exchange-agnostic key.  ``token_id`` is
+        accepted for backward compatibility and used as fallback.
+        """
+        iid = instrument_id or token_id
+        if features is None or portfolio is None:
+            return RiskCheckResult(False, "missing features or portfolio")
+
         checks = [
             self._check_emergency_stop(),
             self._check_circuit_breaker(),
@@ -90,7 +100,7 @@ class RiskManager:
             self._check_liquidity(features),
             self._check_slippage(price, features),
             self._check_cash_sufficiency(side, price, size, portfolio),
-            self._check_market_exposure(token_id, size, portfolio),
+            self._check_market_exposure(iid, size, portfolio),
             self._check_total_exposure(size, portfolio),
             self._check_volatility(features),
         ]
@@ -98,10 +108,9 @@ class RiskManager:
         for result in checks:
             if not result.approved:
                 metrics.increment("risk_rejections")
-                logger.warning("risk_check_failed", reason=result.reason, token_id=token_id)
+                logger.warning("risk_check_failed", reason=result.reason, instrument_id=iid)
                 return result
 
-        # Record the order timestamp for frequency tracking
         with self._lock:
             self._order_timestamps.append(time.time())
 
@@ -264,7 +273,7 @@ class RiskManager:
         return RiskCheckResult(True)
 
     def _check_market_exposure(
-        self, token_id: str, size: float, portfolio: PortfolioSnapshot
+        self, instrument_id: str, size: float, portfolio: PortfolioSnapshot
     ) -> RiskCheckResult:
         """
         Compare in consistent units: existing notional (size*entry_price) for
@@ -272,7 +281,8 @@ class RiskManager:
         max_position_per_market is denominated in token count (shares).
         """
         existing_size = sum(
-            p.size for p in portfolio.positions if p.token_id == token_id
+            p.size for p in portfolio.positions
+            if (p.instrument_id == instrument_id or p.token_id == instrument_id)
         )
         proposed = existing_size + size
         if proposed > self._settings.max_position_per_market:

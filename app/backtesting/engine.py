@@ -140,8 +140,9 @@ class BacktestEngine:
             self._equity_curve.append(equity)
 
             # Mark existing positions to market
+            iid = features.instrument_id or features.token_id
             if features.mid_price is not None:
-                self._portfolio.mark_to_market(features.token_id, features.mid_price)
+                self._portfolio.mark_to_market(iid, features.mid_price)
 
         # Compute result metrics
         result = self._compute_results(start_time, end_time)
@@ -170,9 +171,9 @@ class BacktestEngine:
         price = signal.suggested_price or (features.mid_price or 0.5)
         size = signal.suggested_size or self._settings.default_order_size
 
-        # Risk check
+        iid = signal.instrument_id or signal.token_id
         risk_result = self._risk.check_order(
-            token_id=signal.token_id,
+            instrument_id=iid,
             side=side,
             price=price,
             size=size,
@@ -182,24 +183,22 @@ class BacktestEngine:
         if not risk_result.approved:
             return
 
-        # Simulate fill probability (deterministic from seeded RNG)
         if self._rng.random() > self._config.fill_probability:
             return
 
-        # Apply slippage
         if side == Side.BUY:
             fill_price = price * (1 + self._config.slippage_bps)
         else:
             fill_price = price * (1 - self._config.slippage_bps)
 
-        # Apply fees
         fee = size * fill_price * self._config.fee_rate
 
-        # Create synthetic order and process fill
         order = Order(
             order_id=f"BT-{len(self._trades):06d}",
             market_id=signal.market_id,
-            token_id=signal.token_id,
+            token_id=iid,
+            instrument_id=iid,
+            exchange=signal.exchange,
             side=side,
             price=fill_price,
             size=size,
@@ -223,7 +222,8 @@ class BacktestEngine:
         self._trades.append({
             "timestamp": features.timestamp.isoformat(),
             "market_id": signal.market_id,
-            "token_id": signal.token_id,
+            "instrument_id": iid,
+            "exchange": signal.exchange,
             "side": side.value,
             "price": fill_price,
             "size": size,
@@ -243,15 +243,17 @@ class BacktestEngine:
         total_trades = len(self._trades)
         win_rate = wins / total_trades if total_trades > 0 else 0.0
 
-        avg_duration = 0.0  # would need entry/exit timestamps for real calculation
+        avg_duration = 0.0
 
         exposure_sum = sum(self._equity_curve) - len(self._equity_curve) * initial
         exposure_util = abs(exposure_sum / (len(self._equity_curve) * initial)) if self._equity_curve else 0.0
 
+        exchange_str = self._trades[0].get("exchange", "") if self._trades else ""
         return BacktestResult(
             strategy_name=self._strategy.name,
             start_time=start_time,
             end_time=end_time,
+            exchange=exchange_str,
             total_return=total_return,
             max_drawdown=max_drawdown,
             win_rate=win_rate,
@@ -378,19 +380,22 @@ class MultiLayerBacktestEngine:
                     l2_signals.append(signal_to_normalized(sig, IntelligenceLayer.ML))
                 self._signals_by_layer["l2"] += len(l2_signals)
 
+            iid = features.instrument_id or features.token_id
             if "l3" in self._active_layers and i < len(self._nlp_by_step):
                 for nlp_sig in self._nlp_by_step[i]:
-                    l3_signals.append(nlp_signal_to_layered(nlp_sig, features.token_id))
+                    l3_signals.append(nlp_signal_to_layered(nlp_sig, iid))
                 self._signals_by_layer["l3"] += len(l3_signals)
 
             candidate, trace = self._decision_engine.evaluate(
                 market_id=features.market_id,
-                token_id=features.token_id,
+                token_id=iid,
                 features=features,
                 portfolio=portfolio_snap,
                 l1_signals=l1_signals,
                 l2_signals=l2_signals,
                 l3_signals=l3_signals,
+                instrument_id=iid,
+                exchange=features.exchange,
             )
 
             if not candidate.blocked and candidate.action != SignalAction.HOLD:
@@ -398,7 +403,9 @@ class MultiLayerBacktestEngine:
                 exec_signal = Signal(
                     strategy_name="decision_engine",
                     market_id=candidate.market_id,
-                    token_id=candidate.token_id,
+                    token_id=candidate.instrument_id or candidate.token_id,
+                    instrument_id=candidate.instrument_id or candidate.token_id,
+                    exchange=candidate.exchange,
                     action=candidate.action,
                     confidence=candidate.final_confidence,
                     suggested_price=candidate.suggested_price,
@@ -412,7 +419,7 @@ class MultiLayerBacktestEngine:
             self._equity_curve.append(equity)
 
             if features.mid_price is not None:
-                self._portfolio.mark_to_market(features.token_id, features.mid_price)
+                self._portfolio.mark_to_market(iid, features.mid_price)
 
         return self._compute_results(start_time, end_time)
 
@@ -429,9 +436,10 @@ class MultiLayerBacktestEngine:
 
         price = signal.suggested_price or (features.mid_price or 0.5)
         size = signal.suggested_size or self._settings.default_order_size
+        iid = signal.instrument_id or signal.token_id
 
         risk_result = self._risk.check_order(
-            token_id=signal.token_id,
+            instrument_id=iid,
             side=side,
             price=price,
             size=size,
@@ -454,7 +462,9 @@ class MultiLayerBacktestEngine:
         order = Order(
             order_id=f"MLBT-{len(self._trades):06d}",
             market_id=signal.market_id,
-            token_id=signal.token_id,
+            token_id=iid,
+            instrument_id=iid,
+            exchange=signal.exchange,
             side=side,
             price=fill_price,
             size=size,
@@ -477,7 +487,8 @@ class MultiLayerBacktestEngine:
         self._trades.append({
             "timestamp": features.timestamp.isoformat(),
             "market_id": signal.market_id,
-            "token_id": signal.token_id,
+            "instrument_id": iid,
+            "exchange": signal.exchange,
             "side": side.value,
             "price": fill_price,
             "size": size,

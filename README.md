@@ -1,8 +1,17 @@
-# Polymarket Trading Bot
+# Prediction Market Trading Bot
 
-A professional-grade Polymarket trading and research system with three intelligence layers, containerized for local development and cloud deployment.
+A professional-grade multi-exchange prediction market trading system supporting **Polymarket** and **Kalshi**, with three intelligence layers, containerized for local development and cloud deployment.
 
 **This system does NOT promise profits.** It is designed to minimize mistakes, overtrading, and catastrophic losses through conservative defaults, comprehensive risk controls, and multiple operating modes.
+
+## Supported Exchanges
+
+| Exchange | Status | Config |
+|----------|--------|--------|
+| **Polymarket** | Full support | `EXCHANGE=polymarket` |
+| **Kalshi** | Full support | `EXCHANGE=kalshi` |
+
+The architecture is exchange-agnostic at the core — strategies, decision engine, risk manager, and ML pipeline work identically on both exchanges.
 
 ## Safety Design
 
@@ -30,21 +39,25 @@ All layers produce `NormalizedSignal` objects that the ensemble evaluates with c
 ```
 app/
 ├── config/         Settings, env loading, validation
-├── clients/        REST, WebSocket, trading API
-├── data/           Models, orderbook, features
+├── exchanges/      Exchange adapter layer
+│   ├── base.py     Abstract interfaces (BaseExchangeAdapter, etc.)
+│   ├── polymarket/ Polymarket REST, WS, execution adapters
+│   └── kalshi/     Kalshi REST, WS, execution, auth adapters
+├── clients/        Backward-compatibility shims
+├── data/           Normalized models, orderbook, features
 ├── strategies/     Strategy interface + implementations (L1)
 ├── research/       ML training pipeline (L2)
 ├── nlp/            NLP classifiers, providers, pipeline (L3)
 │   └── providers/  Mock, file, RSS, LLM adapters
 ├── decision/       Signal registry, ensemble, traces
-├── execution/      Order management, state machine
+├── execution/      Exchange-agnostic order management
 ├── risk/           Risk checks, circuit breaker
 ├── portfolio/      Position tracking, PnL
-├── storage/        SQLite repository
+├── storage/        SQLite repository (exchange-aware schema)
 ├── backtesting/    Offline strategy evaluation
 ├── replay/         Session playback
 ├── monitoring/     Logging, health endpoint
-└── main.py         Orchestrator
+└── main.py         Orchestrator (exchange adapter factory)
 ```
 
 ---
@@ -436,12 +449,28 @@ Live trading is disabled by default and requires three explicit gates:
 DRY_RUN=false
 ENABLE_LIVE_TRADING=true
 LIVE_TRADING_ACKNOWLEDGED=true
+```
 
-# Plus valid credentials:
+Plus valid credentials for your chosen exchange:
+
+**Polymarket:**
+
+```bash
+EXCHANGE=polymarket
 PRIVATE_KEY=0x...
 POLY_API_KEY=...
 POLY_API_SECRET=...
 POLY_PASSPHRASE=...
+```
+
+**Kalshi:**
+
+```bash
+EXCHANGE=kalshi
+KALSHI_API_KEY=your-kalshi-api-key
+KALSHI_PRIVATE_KEY_PATH=~/.kalshi/private_key.pem
+# Optional — for demo mode:
+# KALSHI_DEMO_MODE=true
 ```
 
 Then start the bot:
@@ -560,10 +589,16 @@ See [docs/RISK_CONTROLS.md](docs/RISK_CONTROLS.md) for complete documentation.
 ## Running Tests
 
 ```bash
-# Local
+# Local — all tests (includes cross-exchange tests)
 pytest
 pytest -v --tb=short
 pytest --cov=app
+
+# Cross-exchange tests only (proves strategies work on both Polymarket and Kalshi data)
+pytest tests/test_exchange_agnostic.py -v
+
+# Kalshi adapter tests only
+pytest tests/test_kalshi_adapter.py -v
 
 # Docker
 docker compose run --rm bot shell -c "pip install -e '.[dev]' && pytest"
@@ -574,10 +609,13 @@ docker compose run --rm bot shell -c "pip install -e '.[dev]' && pytest"
 ## Supplying Your Own Credentials
 
 1. Copy `.env.example` to `.env`
-2. Fill in your Polymarket credentials (see [docs/](docs/) for credential derivation)
-3. Credentials are **never** included in the Docker image
-4. The `.env` file is excluded from git via `.gitignore`
-5. All secrets are redacted from logs and `repr()` output
+2. Set `EXCHANGE=polymarket` or `EXCHANGE=kalshi`
+3. Fill in credentials for your chosen exchange:
+   - **Polymarket** — API key, secret, passphrase, private key (see [docs/EXCHANGES.md](docs/EXCHANGES.md))
+   - **Kalshi** — API key + RSA private key PEM file (see [docs/EXCHANGES.md](docs/EXCHANGES.md))
+4. Credentials are **never** included in the Docker image
+5. The `.env` file is excluded from git via `.gitignore`
+6. All secrets are redacted from logs and `repr()` output
 
 ---
 

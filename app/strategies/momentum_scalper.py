@@ -67,7 +67,9 @@ class MomentumScalper(BaseStrategy):
         return Signal(
             strategy_name=self.name,
             market_id=features.market_id,
-            token_id=features.token_id,
+            token_id=features.instrument_id or features.token_id,
+            instrument_id=features.instrument_id or features.token_id,
+            exchange=features.exchange,
             action=action,
             confidence=confidence,
             suggested_price=price,

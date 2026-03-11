@@ -1,5 +1,5 @@
 """
-Market mapping: links incoming text/news items to candidate Polymarket markets.
+Market mapping: links incoming text/news items to candidate prediction markets.
 
 Uses a multi-signal relevance score:
   1. Weighted token overlap (IDF-like: rare shared words matter more)
@@ -96,7 +96,7 @@ class MarketMapper:
         for r in results:
             logger.debug(
                 "market_match",
-                market_id=r.market.condition_id,
+                market_id=r.market.market_id or r.market.condition_id,
                 relevance=round(r.relevance_score, 3),
                 token_score=round(r.token_overlap_score, 3),
                 entity_score=round(r.entity_score, 3),
@@ -137,11 +137,11 @@ class MarketMapper:
                     entity_matches.append(e)
         entity_score = min(len(entity_matches) * 0.30, 0.6)
 
-        # 3. Manual override
+        # 3. Manual override (keyed by market_id, condition_id, or ticker)
         override_score = 0.0
-        cid = market.condition_id
-        if cid in self._overrides:
-            for kw in self._overrides[cid]:
+        override_key = market.market_id or market.condition_id
+        if override_key in self._overrides:
+            for kw in self._overrides[override_key]:
                 if kw.lower() in text_lower:
                     override_score = 0.5
                     break
@@ -187,7 +187,7 @@ class MarketMapper:
                 "market_mapping_ambiguous",
                 top_score=round(top, 3),
                 close_count=len(close),
-                markets=[r.market.condition_id for r in [results[0]] + close],
+                markets=[r.market.market_id or r.market.condition_id for r in [results[0]] + close],
             )
 
 

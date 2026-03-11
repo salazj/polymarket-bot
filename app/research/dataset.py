@@ -91,7 +91,7 @@ def generate_synthetic_dataset(n: int = 2000, seed: int = 42) -> pd.DataFrame:
     """Generate realistic-looking synthetic data for demo / testing.
 
     The data has mild autocorrelation in prices and features that loosely
-    resemble real Polymarket orderbook dynamics.  NOT suitable for
+    resemble real prediction-market orderbook dynamics.  NOT suitable for
     evaluating real profitability — only for pipeline validation.
     """
     rng = np.random.default_rng(seed)

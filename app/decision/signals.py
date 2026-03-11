@@ -52,7 +52,9 @@ class NormalizedSignal(BaseModel):
     layer: IntelligenceLayer
     source_name: str
     market_id: str
-    token_id: str
+    token_id: str = ""
+    instrument_id: str = ""
+    exchange: str = ""
 
     action: SignalAction
     direction: int = Field(ge=-1, le=1)
@@ -66,6 +68,13 @@ class NormalizedSignal(BaseModel):
     features_used: list[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=utc_now)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def __init__(self, **data: Any) -> None:
+        if "instrument_id" not in data and "token_id" in data:
+            data["instrument_id"] = data["token_id"]
+        elif "token_id" not in data and "instrument_id" in data:
+            data["token_id"] = data["instrument_id"]
+        super().__init__(**data)
 
 
 # kept as alias for backward compat used in backtesting/pipeline code
@@ -101,9 +110,11 @@ class Veto(BaseModel):
 
 
 class TradeCandidate(BaseModel):
-    """The ensemble's final recommendation for one token."""
+    """The ensemble's final recommendation for one instrument."""
     market_id: str
-    token_id: str
+    token_id: str = ""
+    instrument_id: str = ""
+    exchange: str = ""
     action: SignalAction
     final_confidence: float = Field(ge=0.0, le=1.0)
     expected_edge: float = 0.0
@@ -133,7 +144,9 @@ class DecisionTrace(BaseModel):
     answer "exactly why was this trade taken / not taken?"
     """
     market_id: str
-    token_id: str
+    token_id: str = ""
+    instrument_id: str = ""
+    exchange: str = ""
     timestamp: datetime = Field(default_factory=utc_now)
 
     # Per-layer summaries
@@ -176,7 +189,8 @@ class DecisionTrace(BaseModel):
         """Flat dictionary suitable for structured logging."""
         return {
             "market_id": self.market_id,
-            "token_id": self.token_id,
+            "instrument_id": self.instrument_id or self.token_id,
+            "exchange": self.exchange,
             "l1_direction": self.level_1_summary.direction,
             "l1_confidence": round(self.level_1_summary.mean_confidence, 4),
             "l1_score": round(self.level_1_summary.weighted_score, 4),
