@@ -24,10 +24,14 @@ build
 # Data (mounted at runtime, not baked into image)
 polybot.db
 *.db
-data/
 logs/
 reports/
 model_artifacts/
+
+# Exclude top-level data/ but protect app/data/ (source code)
+data/
+!app/
+!app/**
 
 # Tests and docs (not needed in production image)
 tests/
