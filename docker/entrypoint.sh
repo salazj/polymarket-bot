@@ -82,10 +82,17 @@ mkdir -p /app/data /app/logs /app/model_artifacts /app/reports
 CMD="${1:-bot}"
 shift || true
 
+# uvicorn requires lowercase log level
+UV_LOG_LEVEL=$(echo "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')
+
 case "${CMD}" in
     api)
         echo "Starting API server..."
-        exec uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port ${API_PORT:-8000}
+        exec uvicorn app.api.app:create_app --factory \
+            --host 0.0.0.0 \
+            --port ${API_PORT:-8000} \
+            --log-level "${UV_LOG_LEVEL}" \
+            --access-log
         ;;
     bot)
         echo "Starting bot (mode=${BOT_MODE})..."
