@@ -37,7 +37,7 @@ class DecisionMode(str, Enum):
 
 _MODE_DEFAULTS: dict[DecisionMode, dict[str, Any]] = {
     DecisionMode.CONSERVATIVE: {
-        "min_confidence": 0.50,
+        "min_confidence": 0.25,
         "min_layers_agree": 1,
         "require_l1_approval": False,
         "min_evidence_signals": 1,
@@ -46,7 +46,7 @@ _MODE_DEFAULTS: dict[DecisionMode, dict[str, Any]] = {
         "conflict_tolerance": 0.15,
     },
     DecisionMode.BALANCED: {
-        "min_confidence": 0.40,
+        "min_confidence": 0.18,
         "min_layers_agree": 1,
         "require_l1_approval": False,
         "min_evidence_signals": 1,
@@ -55,7 +55,7 @@ _MODE_DEFAULTS: dict[DecisionMode, dict[str, Any]] = {
         "conflict_tolerance": 0.30,
     },
     DecisionMode.AGGRESSIVE: {
-        "min_confidence": 0.30,
+        "min_confidence": 0.10,
         "min_layers_agree": 1,
         "require_l1_approval": False,
         "min_evidence_signals": 1,
@@ -75,7 +75,7 @@ class EnsembleConfig:
     weight_l2: float = 0.40
     weight_l3: float = 0.30
 
-    min_confidence: float = 0.50
+    min_confidence: float = 0.25
     min_layers_agree: int = 1
     mode: DecisionMode = DecisionMode.CONSERVATIVE
     require_l1_approval: bool = False
@@ -110,11 +110,10 @@ def normalize_confidence(raw: float, layer: IntelligenceLayer) -> float:
     if raw >= 1.0:
         return 1.0
 
-    # Per-layer midpoint and steepness for the logistic squash
     _PARAMS: dict[IntelligenceLayer, tuple[float, float]] = {
-        IntelligenceLayer.RULES: (0.50, 8.0),
-        IntelligenceLayer.ML:    (0.55, 10.0),
-        IntelligenceLayer.NLP:   (0.40, 6.0),
+        IntelligenceLayer.RULES: (0.40, 8.0),
+        IntelligenceLayer.ML:    (0.50, 10.0),
+        IntelligenceLayer.NLP:   (0.20, 6.0),
     }
     mid, k = _PARAMS.get(layer, (0.50, 8.0))
     return 1.0 / (1.0 + math.exp(-k * (raw - mid)))
@@ -254,12 +253,29 @@ def run_ensemble(
 
     summaries = {"l1": s1, "l2": s2, "l3": s3}
 
-    # ── Step 2: Weighted aggregation ───────────────────────────────
-    weighted_scores = {"l1": s1.weighted_score, "l2": s2.weighted_score, "l3": s3.weighted_score}
-    trace.weighted_scores = weighted_scores
+    # ── Step 2: Weighted aggregation (renormalized to active layers) ─
+    active_weights: dict[str, float] = {}
+    layer_scores: dict[str, float] = {}
+    layer_edges: dict[str, float] = {}
 
-    net_score = s1.weighted_score + s2.weighted_score + s3.weighted_score
-    net_edge = w1 * s1.edge + w2 * s2.edge + w3 * s3.edge
+    for key, summary, w in [("l1", s1, w1), ("l2", s2, w2), ("l3", s3, w3)]:
+        if summary.signal_count > 0:
+            active_weights[key] = w
+            layer_scores[key] = summary.weighted_score / w if w > 0 else 0.0
+            layer_edges[key] = summary.edge
+
+    active_total = sum(active_weights.values()) or 1.0
+    renorm = {k: v / active_total for k, v in active_weights.items()}
+
+    net_score = sum(layer_scores[k] * renorm[k] for k in renorm)
+    net_edge = sum(layer_edges.get(k, 0.0) * renorm.get(k, 0.0) for k in renorm)
+
+    weighted_scores = {
+        "l1": layer_scores.get("l1", 0.0) * renorm.get("l1", 0.0),
+        "l2": layer_scores.get("l2", 0.0) * renorm.get("l2", 0.0),
+        "l3": layer_scores.get("l3", 0.0) * renorm.get("l3", 0.0),
+    }
+    trace.weighted_scores = weighted_scores
 
     direction = 1 if net_score > 0 else (-1 if net_score < 0 else 0)
     confidence = min(abs(net_score), 1.0)
