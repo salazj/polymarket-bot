@@ -139,7 +139,12 @@ class UniverseManager:
         active_markets: list[Market],
         books: dict[str, OrderbookSnapshot] | None = None,
     ) -> list[Market]:
-        """Filter, score, and update the watchlist."""
+        """Filter, score, and update the watchlist.
+
+        If strict filtering yields zero eligible markets, falls back to
+        relaxed mode (skip hard filters, keep only category preferences)
+        so the bot can always start.
+        """
         books = books or {}
         eligible: list[Market] = []
         filtered_out: list[tuple[str, str]] = []
@@ -158,6 +163,27 @@ class UniverseManager:
                 continue
 
             eligible.append(market)
+
+        if not eligible and active_markets:
+            logger.warning(
+                "all_markets_filtered_out",
+                total_active=len(active_markets),
+                filter_reasons={r: sum(1 for _, x in filtered_out if x.split(":")[0] == r.split(":")[0])
+                                for _, r in filtered_out[:5]},
+                hint="Falling back to relaxed mode — skipping hard filters",
+            )
+            eligible = [
+                m for m in active_markets
+                if self._categories.is_allowed(m)
+            ]
+            if not eligible:
+                logger.warning(
+                    "no_markets_pass_category_filter",
+                    total_active=len(active_markets),
+                    include=list(self._categories.config.include_categories)[:5],
+                    hint="Accepting all markets regardless of category",
+                )
+                eligible = list(active_markets)
 
         for mid in self._scanner.resolved:
             self._watchlist.force_remove(mid)

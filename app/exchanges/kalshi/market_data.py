@@ -97,11 +97,117 @@ class KalshiMarketDataClient(BaseMarketDataClient):
         return markets, next_cursor
 
     async def get_all_markets(self, max_markets: int = 5000) -> list[Market]:
+        """Fetch markets using the events-based approach to skip parlay flood.
+
+        Strategy: fetch open events first (always real), then batch-fetch
+        their markets via the event_ticker filter.  Falls back to direct
+        market pagination if the events approach yields nothing.
+        """
+        all_markets, cat_map = await self._fetch_via_events(max_markets)
+
+        if len(all_markets) < 20:
+            logger.warning(
+                "kalshi_events_approach_low",
+                count=len(all_markets),
+                fallback="direct_pagination",
+            )
+            fallback = await self._fetch_via_pagination(max_markets)
+            seen = {m.market_id for m in all_markets}
+            for m in fallback:
+                if m.market_id not in seen:
+                    all_markets.append(m)
+                    seen.add(m.market_id)
+
+        if cat_map:
+            for market in all_markets:
+                event_ticker = (market.exchange_data or {}).get("event_ticker", "")
+                cat = cat_map.get(event_ticker, "")
+                if cat:
+                    market.category = cat
+                    market.exchange_data["category"] = cat
+
+        logger.info("kalshi_fetched_all_markets", total=len(all_markets))
+        return all_markets
+
+    async def _fetch_via_events(self, max_markets: int) -> tuple[list[Market], dict[str, str]]:
+        """Primary approach: fetch events, then get markets per event."""
+        import asyncio
+
+        cat_map: dict[str, str] = {}
+        event_tickers: list[str] = []
+        cursor = ""
+
+        for _ in range(100):
+            params: dict[str, Any] = {"limit": 200, "status": "open"}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                data = await self._get("/events", params=params)
+            except Exception as e:
+                logger.warning("kalshi_events_fetch_error", error=str(e))
+                break
+            events = data.get("events", [])
+            for ev in events:
+                ticker = ev.get("event_ticker", "")
+                category = ev.get("category", "")
+                if ticker:
+                    event_tickers.append(ticker)
+                    if category:
+                        cat_map[ticker] = category.lower()
+            cursor = data.get("cursor", "")
+            if not cursor:
+                break
+
+        logger.info("kalshi_events_discovered", total=len(event_tickers))
+
+        all_markets: list[Market] = []
+        batch_size = 10
+        for i in range(0, len(event_tickers), batch_size):
+            if len(all_markets) >= max_markets:
+                break
+            batch = event_tickers[i : i + batch_size]
+            tasks = [self._fetch_event_markets(et) for et in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    continue
+                all_markets.extend(result)
+
+            if (i // batch_size) % 20 == 0 and i > 0:
+                logger.debug(
+                    "kalshi_event_markets_progress",
+                    events_processed=i + len(batch),
+                    markets_found=len(all_markets),
+                )
+
+        logger.info(
+            "kalshi_events_markets_fetched",
+            events_scanned=len(event_tickers),
+            markets_found=len(all_markets),
+        )
+        return all_markets, cat_map
+
+    async def _fetch_event_markets(self, event_ticker: str) -> list[Market]:
+        """Fetch all open markets for a single event."""
+        try:
+            params: dict[str, Any] = {
+                "event_ticker": event_ticker,
+                "limit": 100,
+                "status": "open",
+            }
+            data = await self._get("/markets", params=params)
+            raw_markets = data.get("markets", [])
+            return [normalize_market(m) for m in raw_markets if not _is_parlay(m)]
+        except Exception:
+            return []
+
+    async def _fetch_via_pagination(self, max_markets: int) -> list[Market]:
+        """Fallback: paginate through /markets directly."""
         all_markets: list[Market] = []
         cursor = ""
-        max_raw_pages = 100
         consecutive_empty = 0
-        for page_num in range(max_raw_pages):
+
+        for page_num in range(100):
             page, cursor = await self.get_markets(cursor)
             all_markets.extend(page)
             if not cursor:
@@ -112,22 +218,14 @@ class KalshiMarketDataClient(BaseMarketDataClient):
                 consecutive_empty = 0
             else:
                 consecutive_empty += 1
-            if len(all_markets) >= 500 and consecutive_empty >= 20:
-                logger.info("kalshi_paging_stopped_early", reason="consecutive_empty",
-                            pages=page_num + 1, fetched=len(all_markets))
+            if len(all_markets) >= 50 and consecutive_empty >= 30:
                 break
-            logger.debug("kalshi_paging_markets", page=page_num + 1, fetched=len(all_markets))
+            logger.debug(
+                "kalshi_paging_markets",
+                page=page_num + 1,
+                fetched=len(all_markets),
+            )
 
-        cat_map = await self.get_event_categories()
-        if cat_map:
-            for market in all_markets:
-                event_ticker = (market.exchange_data or {}).get("event_ticker", "")
-                cat = cat_map.get(event_ticker, "")
-                if cat:
-                    market.category = cat
-                    market.exchange_data["category"] = cat
-
-        logger.info("kalshi_fetched_all_markets", total=len(all_markets))
         return all_markets
 
     async def get_event_categories(self) -> dict[str, str]:
