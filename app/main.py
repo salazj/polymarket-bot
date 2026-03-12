@@ -459,6 +459,8 @@ class TradingBot:
         instrument_ids: list[str] = []
         for market in markets:
             await self._repository.save_market(market)
+            yes_price = (market.exchange_data or {}).get("yes_price")
+
             for token in market.tokens:
                 iid = token.instrument_id or token.token_id
                 if iid not in self._instrument_to_market:
@@ -469,6 +471,19 @@ class TradingBot:
                         instrument_id=iid,
                         exchange=self._settings.exchange,
                     )
+
+                    if yes_price is not None:
+                        is_no = iid.endswith("-no")
+                        price = (1.0 - yes_price) if is_no else yes_price
+                        bid = max(price - 0.01, 0.01)
+                        ask = min(price + 0.01, 0.99)
+                        self._orderbook.apply_snapshot(
+                            market_id=market.market_id,
+                            instrument_id=iid,
+                            bids=[{"price": bid, "size": 10}],
+                            asks=[{"price": ask, "size": 10}],
+                        )
+
         return instrument_ids
 
     async def _universe_refresh_loop(self) -> None:

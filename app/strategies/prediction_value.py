@@ -25,12 +25,12 @@ from app.utils.helpers import utc_now
 
 logger = get_logger(__name__)
 
-EDGE_THRESHOLD = 0.04
-EXTREME_LOW = 0.08
-EXTREME_HIGH = 0.92
-MIN_SPREAD = 0.01
-MAX_SPREAD = 0.15
-MOMENTUM_THRESHOLD = 0.03
+EDGE_THRESHOLD = 0.01
+EXTREME_LOW = 0.15
+EXTREME_HIGH = 0.85
+MIN_SPREAD = 0.005
+MAX_SPREAD = 0.30
+MOMENTUM_THRESHOLD = 0.02
 
 
 @StrategyRegistry.register
