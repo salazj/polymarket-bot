@@ -461,8 +461,23 @@ class TradingBot:
         """Register markets: save to DB, build instrument mapping and feature engines."""
         instrument_ids: list[str] = []
         for market in markets:
-            await self._repository.save_market(market)
             yes_price = (market.exchange_data or {}).get("yes_price")
+
+            if yes_price is None:
+                try:
+                    fresh = await self._adapter.market_data.get_market(market.market_id)
+                    if fresh:
+                        yes_price = (fresh.exchange_data or {}).get("yes_price")
+                        if yes_price is not None:
+                            market.exchange_data["yes_price"] = yes_price
+                            market.exchange_data["yes_ask"] = (fresh.exchange_data or {}).get("yes_ask")
+                            market.exchange_data["no_price"] = (fresh.exchange_data or {}).get("no_price")
+                            market.exchange_data["volume"] = (fresh.exchange_data or {}).get("volume", 0)
+                            market.exchange_data["open_interest"] = (fresh.exchange_data or {}).get("open_interest", 0)
+                except Exception as e:
+                    logger.warning("market_refresh_failed", market_id=market.market_id, error=str(e))
+
+            await self._repository.save_market(market)
 
             for token in market.tokens:
                 iid = token.instrument_id or token.token_id
