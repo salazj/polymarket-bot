@@ -120,6 +120,9 @@ class LLMMarketAnalyzer:
         self.api_calls: int = 0
         self.errors: int = 0
         self.last_call_at: str | None = None
+        self.historical_calls: int = 0
+        self.historical_cost: float = 0.0
+        self._last_persisted_calls: int = 0
 
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key:
@@ -137,13 +140,29 @@ class LLMMarketAnalyzer:
             max_markets=max_markets_per_cycle,
         )
 
+    def load_historical(self, api_calls: int, estimated_cost: float) -> None:
+        self.historical_calls = api_calls
+        self.historical_cost = estimated_cost
+
     def get_stats(self) -> dict[str, Any]:
+        total_calls = self.historical_calls + self.api_calls
+        total_cost = self.historical_cost + round(self.api_calls * self.COST_PER_CALL, 4)
         return {
-            "api_calls": self.api_calls,
+            "api_calls": total_calls,
             "errors": self.errors,
-            "estimated_cost": round(self.api_calls * self.COST_PER_CALL, 4),
+            "estimated_cost": round(total_cost, 4),
+            "session_calls": self.api_calls,
+            "session_cost": round(self.api_calls * self.COST_PER_CALL, 4),
             "last_call_at": self.last_call_at,
         }
+
+    def get_cost_delta(self) -> tuple[int, int, float]:
+        """Return (new_calls, new_errors, new_cost) since last persist."""
+        delta_calls = self.api_calls - self._last_persisted_calls
+        delta_cost = round(delta_calls * self.COST_PER_CALL, 6)
+        delta_errors = self.errors
+        self._last_persisted_calls = self.api_calls
+        return delta_calls, delta_errors, delta_cost
 
     async def analyze_markets(
         self,
@@ -341,6 +360,9 @@ class ClaudeMarketAnalyzer:
         self.api_calls: int = 0
         self.errors: int = 0
         self.last_call_at: str | None = None
+        self.historical_calls: int = 0
+        self.historical_cost: float = 0.0
+        self._last_persisted_calls: int = 0
 
         self._client = httpx.AsyncClient(
             base_url="https://api.anthropic.com",
@@ -358,13 +380,28 @@ class ClaudeMarketAnalyzer:
             max_markets=max_markets_per_cycle,
         )
 
+    def load_historical(self, api_calls: int, estimated_cost: float) -> None:
+        self.historical_calls = api_calls
+        self.historical_cost = estimated_cost
+
     def get_stats(self) -> dict[str, Any]:
+        total_calls = self.historical_calls + self.api_calls
+        total_cost = self.historical_cost + round(self.api_calls * self.COST_PER_CALL, 4)
         return {
-            "api_calls": self.api_calls,
+            "api_calls": total_calls,
             "errors": self.errors,
-            "estimated_cost": round(self.api_calls * self.COST_PER_CALL, 4),
+            "estimated_cost": round(total_cost, 4),
+            "session_calls": self.api_calls,
+            "session_cost": round(self.api_calls * self.COST_PER_CALL, 4),
             "last_call_at": self.last_call_at,
         }
+
+    def get_cost_delta(self) -> tuple[int, int, float]:
+        delta_calls = self.api_calls - self._last_persisted_calls
+        delta_cost = round(delta_calls * self.COST_PER_CALL, 6)
+        delta_errors = self.errors
+        self._last_persisted_calls = self.api_calls
+        return delta_calls, delta_errors, delta_cost
 
     async def analyze_markets(
         self,

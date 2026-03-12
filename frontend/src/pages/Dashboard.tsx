@@ -81,6 +81,7 @@ function formatInterval(seconds: number): string {
 }
 
 const SERVICE_ICONS: Record<string, React.ReactNode> = {
+  kalshi: <Wallet className="h-4 w-4 text-emerald-400" />,
   gpt4o: <Brain className="h-4 w-4 text-emerald-400" />,
   claude: <Brain className="h-4 w-4 text-violet-400" />,
   newsapi: <Newspaper className="h-4 w-4 text-sky-400" />,
@@ -525,12 +526,18 @@ export default function Dashboard() {
                     </Badge>
                   </div>
                   <div className="flex items-center gap-3">
-                    {svc.type === "llm" && svc.api_calls > 0 && (
-                      <span className="text-[11px] text-muted-foreground tabular-nums">
-                        {svc.api_calls} calls (~${svc.estimated_cost.toFixed(2)})
+                    {/* Balance / Cost display */}
+                    {svc.balance != null ? (
+                      <span className="text-sm font-bold tabular-nums text-emerald-400">
+                        {formatUSD(svc.balance)}
                       </span>
-                    )}
-                    {svc.status !== "not_configured" && (
+                    ) : svc.type === "llm" && svc.estimated_cost > 0 ? (
+                      <span className="text-sm font-semibold tabular-nums text-amber-400">
+                        ${svc.estimated_cost.toFixed(2)} spent
+                      </span>
+                    ) : null}
+
+                    {svc.status !== "not_configured" && svc.type !== "exchange" && (
                       <button
                         onClick={() => handleToggleService(svc.name, !svc.enabled)}
                         className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
@@ -549,6 +556,19 @@ export default function Dashboard() {
                     )}
                   </div>
                 </div>
+                {/* LLM detail row: calls + balance check link */}
+                {svc.type === "llm" && svc.api_calls > 0 && (
+                  <div className="flex items-center justify-between mt-1.5 text-[11px] text-muted-foreground">
+                    <span className="tabular-nums">{svc.api_calls} total API calls</span>
+                    {svc.balance_label && (
+                      <span className="text-[10px] opacity-70">{svc.balance_label}</span>
+                    )}
+                  </div>
+                )}
+                {/* Kalshi detail row */}
+                {svc.type === "exchange" && svc.balance_label && (
+                  <div className="mt-1 text-[11px] text-muted-foreground">{svc.balance_label}</div>
+                )}
                 {svc.type === "llm" && svc.status !== "not_configured" && svc.enabled && (
                   <FrequencySlider service={svc} onUpdate={handleIntervalUpdate} />
                 )}

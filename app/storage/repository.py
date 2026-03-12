@@ -167,6 +167,14 @@ CREATE TABLE IF NOT EXISTS nlp_signals (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS api_costs (
+    service TEXT PRIMARY KEY,
+    api_calls INTEGER DEFAULT 0,
+    errors INTEGER DEFAULT 0,
+    estimated_cost REAL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_raw_events_token ON raw_events(token_id);
 CREATE INDEX IF NOT EXISTS idx_raw_events_type ON raw_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_features_token ON features(token_id);
@@ -412,6 +420,31 @@ class Repository:
             (order_id, price, size, pnl, filled_at),
         )
         await self._db.commit()
+
+    # ── API Costs ──────────────────────────────────────────────────────
+
+    async def save_api_cost(self, service: str, api_calls: int, errors: int, estimated_cost: float) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            """INSERT INTO api_costs (service, api_calls, errors, estimated_cost, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(service) DO UPDATE SET
+                 api_calls = api_calls + excluded.api_calls,
+                 errors = errors + excluded.errors,
+                 estimated_cost = estimated_cost + excluded.estimated_cost,
+                 updated_at = excluded.updated_at""",
+            (service, api_calls, errors, estimated_cost, _to_iso(datetime.utcnow())),
+        )
+        await self._db.commit()
+
+    async def get_api_costs(self) -> dict[str, dict]:
+        assert self._db is not None
+        cursor = await self._db.execute("SELECT service, api_calls, errors, estimated_cost FROM api_costs")
+        rows = await cursor.fetchall()
+        return {
+            r[0]: {"api_calls": r[1], "errors": r[2], "estimated_cost": r[3]}
+            for r in rows
+        }
 
     # ── Positions ──────────────────────────────────────────────────────
 

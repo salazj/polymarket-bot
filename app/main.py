@@ -180,6 +180,7 @@ class TradingBot:
         self._llm_interval_seconds: float = float(self._settings.llm_analysis_interval)
         self._claude_interval_seconds: float = float(self._settings.claude_analysis_interval)
         self._provider_enabled: dict[str, bool] = {}
+        self._kalshi_balance: float = 0.0
         self._init_service_registry()
 
     def _init_service_registry(self) -> None:
@@ -199,6 +200,21 @@ class TradingBot:
         """Return current stats for all services."""
         services: list[dict] = []
 
+        services.append({
+            "name": "kalshi",
+            "label": "Kalshi",
+            "type": "exchange",
+            "status": "active" if self._running else "disabled",
+            "enabled": True,
+            "api_calls": 0,
+            "errors": 0,
+            "estimated_cost": 0.0,
+            "balance": self._kalshi_balance,
+            "balance_label": "Account balance",
+            "last_call_at": None,
+            "interval_seconds": None,
+        })
+
         gpt_stats = self._llm_analyzer.get_stats() if self._llm_analyzer else {}
         services.append({
             "name": "gpt4o",
@@ -211,6 +227,8 @@ class TradingBot:
             "api_calls": gpt_stats.get("api_calls", 0),
             "errors": gpt_stats.get("errors", 0),
             "estimated_cost": gpt_stats.get("estimated_cost", 0.0),
+            "balance": None,
+            "balance_label": "Check platform.openai.com",
             "last_call_at": gpt_stats.get("last_call_at"),
             "interval_seconds": int(self._llm_interval_seconds),
         })
@@ -227,6 +245,8 @@ class TradingBot:
             "api_calls": claude_stats.get("api_calls", 0),
             "errors": claude_stats.get("errors", 0),
             "estimated_cost": claude_stats.get("estimated_cost", 0.0),
+            "balance": None,
+            "balance_label": "Check console.anthropic.com",
             "last_call_at": claude_stats.get("last_call_at"),
             "interval_seconds": int(self._claude_interval_seconds),
         })
@@ -246,6 +266,8 @@ class TradingBot:
                 "api_calls": 0,
                 "errors": 0,
                 "estimated_cost": 0.0,
+                "balance": None,
+                "balance_label": None,
                 "last_call_at": None,
                 "interval_seconds": None,
             })
@@ -384,6 +406,7 @@ class TradingBot:
         # Fetch actual exchange balance and sync portfolio
         try:
             exchange_balance = await self._adapter.execution.get_balance()
+            self._kalshi_balance = exchange_balance
             if exchange_balance > 0:
                 self._portfolio._cash = exchange_balance
                 self._portfolio._initial_cash = exchange_balance
@@ -396,6 +419,19 @@ class TradingBot:
                 )
         except Exception as e:
             logger.warning("exchange_balance_fetch_failed", error=str(e))
+
+        # Load historical LLM cost data
+        try:
+            historical = await self._repository.get_api_costs()
+            if self._llm_analyzer and "gpt4o" in historical:
+                h = historical["gpt4o"]
+                self._llm_analyzer.load_historical(h["api_calls"], h["estimated_cost"])
+            if self._claude_analyzer and "claude" in historical:
+                h = historical["claude"]
+                self._claude_analyzer.load_historical(h["api_calls"], h["estimated_cost"])
+            logger.info("api_cost_history_loaded", services=list(historical.keys()))
+        except Exception as e:
+            logger.warning("api_cost_history_load_failed", error=str(e))
 
         # Strategic market-universe selection with retry
         max_retries = 3
@@ -903,6 +939,20 @@ class TradingBot:
 
             await asyncio.sleep(interval)
 
+    async def _persist_api_costs(self) -> None:
+        """Save incremental LLM costs to the database."""
+        try:
+            if self._llm_analyzer:
+                dc, de, dcost = self._llm_analyzer.get_cost_delta()
+                if dc > 0:
+                    await self._repository.save_api_cost("gpt4o", dc, de, dcost)
+            if self._claude_analyzer:
+                dc, de, dcost = self._claude_analyzer.get_cost_delta()
+                if dc > 0:
+                    await self._repository.save_api_cost("claude", dc, de, dcost)
+        except Exception as e:
+            logger.warning("api_cost_persist_failed", error=str(e))
+
     async def _persist_positions(self) -> None:
         try:
             positions = self._portfolio.positions
@@ -1311,6 +1361,13 @@ class TradingBot:
 
                 if self._mode == TradingMode.LIVE:
                     await self._reconcile_positions()
+
+                # Persist LLM costs and refresh Kalshi balance
+                await self._persist_api_costs()
+                try:
+                    self._kalshi_balance = await self._adapter.execution.get_balance()
+                except Exception:
+                    pass
 
                 if self._adapter.websocket.is_stale:
                     logger.warning(
