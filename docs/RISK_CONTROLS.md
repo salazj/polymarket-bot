@@ -116,9 +116,32 @@ For a $100 bankroll, first-time user:
 | MAX_ORDERS_PER_MINUTE | 6 | Prevent overtrading |
 | MAX_CONSECUTIVE_LOSSES | 5 | Auto-halt on losing streak |
 
+## Stock-Specific Risk Controls
+
+When running in equities mode (`ASSET_CLASS=equities`), additional risk controls apply:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `STOCK_MAX_POSITION_DOLLARS` | $1,000 | Maximum dollar value per stock position |
+| `STOCK_MAX_PORTFOLIO_DOLLARS` | $10,000 | Maximum total portfolio exposure |
+| `STOCK_MAX_DAILY_LOSS_DOLLARS` | $500 | Daily loss limit before circuit breaker |
+| `STOCK_MAX_OPEN_POSITIONS` | 10 | Maximum concurrent positions |
+| `STOCK_MAX_ORDERS_PER_MINUTE` | 10 | Order frequency limit |
+| `ALLOW_EXTENDED_HOURS` | false | Whether to trade outside regular hours |
+
+### Market Hours Gate
+When `ALLOW_EXTENDED_HOURS=false`, the stock risk manager blocks all orders outside NYSE regular hours (9:30 AM - 4:00 PM ET, Mon-Fri).
+
+### GUI Risk Controls
+The web GUI provides a dedicated Risk Controls page at `/risk` with:
+- Real-time risk state monitoring
+- Circuit breaker reset button
+- Emergency stop button (double-confirmation required)
+- Risk parameter display
+
 ## Monitoring Risk in Production
 
 1. Watch structured logs for `risk_check_failed` and `CIRCUIT_BREAKER_TRIPPED` events.
-2. Periodically run `python scripts/export_pnl_report.py` to review performance.
+2. Use the web GUI Risk page at `http://localhost:3000/risk` for real-time monitoring.
 3. Monitor the `metrics.snapshot()` counters for `risk_rejections` and `orders_rejected_risk`.
 4. Keep the emergency stop file mechanism ready.

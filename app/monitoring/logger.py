@@ -30,6 +30,8 @@ def setup_logging(level: str = "INFO", json_output: bool = False) -> None:
     log_level = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=log_level)
 
+    from app.api.log_broadcaster import log_broadcaster
+
     processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
@@ -37,6 +39,7 @@ def setup_logging(level: str = "INFO", json_output: bool = False) -> None:
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        log_broadcaster,
     ]
 
     if json_output:

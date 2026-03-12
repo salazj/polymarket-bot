@@ -30,14 +30,15 @@ ENV PROJECT_ROOT=/app \
     ENABLE_LIVE_TRADING=false \
     LIVE_TRADING_ACKNOWLEDGED=false \
     BOT_MODE=dry-run \
-    HEALTH_PORT=8880
+    HEALTH_PORT=8880 \
+    API_PORT=8000
 
-EXPOSE ${HEALTH_PORT}
+EXPOSE ${HEALTH_PORT} ${API_PORT}
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -sf http://127.0.0.1:${HEALTH_PORT}/health || exit 1
+    CMD curl -sf http://127.0.0.1:${API_PORT}/api/health || curl -sf http://127.0.0.1:${HEALTH_PORT}/health || exit 1
 
 USER botuser
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["bot"]
+CMD ["api"]

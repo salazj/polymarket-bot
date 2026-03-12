@@ -20,9 +20,13 @@ ENABLE_LIVE_TRADING="${ENABLE_LIVE_TRADING:-false}"
 LIVE_TRADING_ACKNOWLEDGED="${LIVE_TRADING_ACKNOWLEDGED:-false}"
 
 EXCHANGE="${EXCHANGE:-polymarket}"
+ASSET_CLASS="${ASSET_CLASS:-prediction_markets}"
+BROKER="${BROKER:-alpaca}"
 
 echo "=============================================="
+echo "  Asset:    ${ASSET_CLASS}"
 echo "  Exchange: ${EXCHANGE}"
+echo "  Broker:   ${BROKER}"
 echo "  Mode:     ${BOT_MODE}"
 echo "  Dry Run:  ${DRY_RUN}"
 echo "  Live:     ${ENABLE_LIVE_TRADING}"
@@ -41,7 +45,13 @@ if [ "${DRY_RUN}" = "false" ] && [ "${ENABLE_LIVE_TRADING}" = "true" ] && [ "${L
     echo "  Real orders WILL be submitted."
     echo ""
 
-    if [ "${EXCHANGE}" = "kalshi" ]; then
+    if [ "${ASSET_CLASS}" = "equities" ]; then
+        if [ -z "${ALPACA_API_KEY:-}" ] || [ -z "${ALPACA_SECRET_KEY:-}" ]; then
+            echo "ERROR: Equities live trading requires ALPACA_API_KEY and ALPACA_SECRET_KEY."
+            echo "       Set them in your .env file or environment."
+            exit 1
+        fi
+    elif [ "${EXCHANGE}" = "kalshi" ]; then
         if [ -z "${KALSHI_API_KEY:-}" ]; then
             echo "ERROR: Kalshi live trading requires KALSHI_API_KEY."
             echo "       Set it in your .env file or environment."
@@ -73,6 +83,10 @@ CMD="${1:-bot}"
 shift || true
 
 case "${CMD}" in
+    api)
+        echo "Starting API server..."
+        exec uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port ${API_PORT:-8000}
+        ;;
     bot)
         echo "Starting bot (mode=${BOT_MODE})..."
         exec python -m app.main "$@"
@@ -114,7 +128,7 @@ for item in result.per_item:
         ;;
     *)
         echo "Unknown command: ${CMD}"
-        echo "Available: bot, backtest, replay, train, evaluate, nlp-replay, shell, health"
+        echo "Available: api, bot, backtest, replay, train, evaluate, nlp-replay, shell, health"
         exit 1
         ;;
 esac

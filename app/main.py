@@ -60,16 +60,33 @@ class TradingBot:
 
         self._mode = TradingMode.DRY_RUN if self._settings.dry_run else TradingMode.LIVE
         self._running = False
+        self._is_equities = self._settings.asset_class == "equities"
 
+        # Shared components
+        self._portfolio = PortfolioTracker(self._settings)
+        self._repository = Repository(self._settings.database_url)
+
+        # NLP pipeline + news ingestion (shared across asset classes)
+        self._nlp_pipeline = self._build_nlp_pipeline()
+        self._news_service = NewsIngestionService(
+            pipeline=self._nlp_pipeline,
+            poll_interval=float(self._settings.news_poll_interval),
+        )
+        self._setup_nlp_providers()
+
+        if self._is_equities:
+            self._init_equities()
+        else:
+            self._init_prediction_markets()
+
+    def _init_prediction_markets(self) -> None:
+        """Set up all prediction-market-specific components."""
         # Exchange adapter (Polymarket or Kalshi)
         self._adapter: BaseExchangeAdapter = build_exchange_adapter(self._settings)
 
-        # Core components
         self._risk_manager = RiskManager(self._settings)
-        self._portfolio = PortfolioTracker(self._settings)
         self._execution = ExecutionEngine(self._settings, self._adapter.execution, self._risk_manager)
         self._risk_manager.set_cancel_all_callback(self._execution.cancel_all_orders)
-        self._repository = Repository(self._settings.database_url)
         self._orderbook = OrderbookManager()
         self._feature_engines: dict[str, FeatureEngine] = {}
 
@@ -106,14 +123,7 @@ class TradingBot:
                 self._ml_strategy = s
                 break
 
-        # Level 3: NLP pipeline + news ingestion
-        self._nlp_pipeline = self._build_nlp_pipeline()
-        self._news_service = NewsIngestionService(
-            pipeline=self._nlp_pipeline,
-            poll_interval=float(self._settings.news_poll_interval),
-        )
         self._news_service.set_market_provider(lambda: self._active_markets)
-        self._setup_nlp_providers()
 
         # Universe selection (upstream from strategy execution)
         self._universe = UniverseManager(self._settings, self._adapter.market_data)
@@ -128,6 +138,34 @@ class TradingBot:
         # Markets to trade
         self._active_markets: list[Market] = []
         self._instrument_to_market: dict[str, Market] = {}
+
+    def _init_equities(self) -> None:
+        """Set up all equities-specific components."""
+        from app.brokers import build_broker_adapter
+        from app.stocks.execution import StockExecutionEngine
+        from app.stocks.features import StockFeatureEngine
+        from app.stocks.risk import StockRiskManager
+        from app.stocks.strategies import ALL_STOCK_STRATEGIES
+        from app.stocks.universe import StockUniverseManager
+
+        self._broker = build_broker_adapter(self._settings)
+        self._stock_risk = StockRiskManager(self._settings)
+        self._stock_execution = StockExecutionEngine(
+            self._settings, self._broker.execution, self._stock_risk
+        )
+        self._stock_risk.set_cancel_all_callback(self._stock_execution.cancel_all_orders)
+        self._stock_universe = StockUniverseManager(
+            self._settings, self._broker.market_data
+        )
+        self._stock_strategies = [cls() for cls in ALL_STOCK_STRATEGIES]
+        self._stock_feature_engines: dict[str, StockFeatureEngine] = {}
+        self._active_markets: list[Market] = []
+
+        self._health_server = HealthServer(
+            portfolio_snapshot_fn=self._portfolio.get_snapshot,
+            is_halted_fn=lambda: self._stock_risk.is_halted,
+            ws_connected_fn=lambda: self._broker.streaming.is_connected,
+        )
 
     def _build_nlp_pipeline(self) -> NlpPipeline:
         llm = build_llm_classifier(
@@ -174,6 +212,10 @@ class TradingBot:
             self._news_service.register_provider(MockProvider())
 
     async def start(self, market_slugs: list[str] | None = None) -> None:
+        if self._is_equities:
+            await self._start_equities()
+            return
+
         strategy_names = [s.name for s in self._l1_strategies]
         logger.info(
             "bot_starting",
@@ -247,6 +289,11 @@ class TradingBot:
     async def stop(self) -> None:
         logger.info("bot_stopping")
         self._running = False
+
+        if self._is_equities:
+            await self._stop_equities()
+            return
+
         self._universe.stop()
         await self._news_service.stop()
         await self._health_server.stop()
@@ -259,6 +306,107 @@ class TradingBot:
         )
         logger.info("bot_stopped", **{k: v for k, v in summary.items() if k != "positions"})
         await self._repository.close()
+
+    # ── Equities Mode ──────────────────────────────────────────────────
+
+    async def _start_equities(self) -> None:
+        """Start the bot in equities mode with the Alpaca broker."""
+        logger.info(
+            "bot_starting_equities",
+            mode=self._mode.value,
+            broker=self._settings.broker,
+            dry_run=self._settings.dry_run,
+            strategies=[s.name for s in self._stock_strategies],
+        )
+
+        await self._repository.initialize()
+
+        symbols = await self._stock_universe.initial_selection()
+        if not symbols:
+            logger.error("no_stock_symbols_selected")
+            return
+
+        from app.stocks.features import StockFeatureEngine
+
+        for sym in symbols:
+            self._stock_feature_engines[sym] = StockFeatureEngine(sym)
+            self._stock_feature_engines[sym].start_new_day()
+
+        logger.info("stocks_loaded", count=len(symbols), symbols=symbols[:10])
+
+        await self._health_server.start()
+        self._running = True
+        self._portfolio.start_new_day()
+
+        await asyncio.gather(
+            self._broker.streaming.connect(),
+            self._stock_intelligence_loop(),
+            self._stock_housekeeping_loop(),
+            self._news_service.start(),
+        )
+
+    async def _stop_equities(self) -> None:
+        await self._news_service.stop()
+        await self._health_server.stop()
+        await self._stock_execution.cancel_all_orders()
+        await self._broker.close()
+        await self._repository.close()
+        logger.info("bot_stopped_equities")
+
+    async def _stock_intelligence_loop(self) -> None:
+        """Main loop for equities trading."""
+        while self._running:
+            await asyncio.sleep(5.0)
+
+            if self._stock_risk.is_halted:
+                logger.warning("stock_trading_halted")
+                continue
+
+            if not self._settings.allow_extended_hours and not self._broker.is_market_open():
+                continue
+
+            for symbol, engine in self._stock_feature_engines.items():
+                try:
+                    quote_data = await self._broker.market_data.get_quote(symbol)
+                    engine.update_quote(
+                        bid=quote_data.get("bid", 0),
+                        ask=quote_data.get("ask", 0),
+                        last=quote_data.get("last", quote_data.get("bid", 0)),
+                    )
+
+                    features = engine.compute()
+                    portfolio_snap = self._portfolio.get_snapshot()
+
+                    for strat in self._stock_strategies:
+                        try:
+                            sig = strat.generate_signal(features, portfolio_snap)
+                            if sig is not None and sig.action.value != "HOLD":
+                                await self._stock_execution.process_signal(
+                                    sig, features, portfolio_snap, broker=self._broker
+                                )
+                        except Exception:
+                            logger.exception("stock_strategy_error", strategy=strat.name)
+
+                except Exception as exc:
+                    logger.error("stock_loop_error", symbol=symbol, error=str(exc))
+                    metrics.increment("stock_loop_errors")
+
+    async def _stock_housekeeping_loop(self) -> None:
+        """Periodic maintenance for equities mode."""
+        while self._running:
+            await asyncio.sleep(60.0)
+            try:
+                snap = self._portfolio.get_snapshot()
+                await self._repository.save_pnl_snapshot(
+                    cash=snap.cash,
+                    total_exposure=snap.total_exposure,
+                    total_unrealized=snap.total_unrealized_pnl,
+                    total_realized=snap.total_realized_pnl,
+                    daily_pnl=snap.daily_pnl,
+                )
+                await self._repository.flush()
+            except Exception as exc:
+                logger.error("stock_housekeeping_error", error=str(exc))
 
     async def _setup_market_instruments(self, markets: list[Market]) -> list[str]:
         """Register markets: save to DB, build instrument mapping and feature engines."""

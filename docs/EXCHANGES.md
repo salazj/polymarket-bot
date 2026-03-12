@@ -1,13 +1,17 @@
-# Exchange Abstraction Guide
+# Exchanges and Brokers
 
 ## Overview
 
-The trading bot uses a pluggable exchange adapter architecture. The core system
-(strategies, decision engine, risk manager, portfolio tracker) is exchange-agnostic
-and operates on normalized data models. Exchange-specific logic is isolated in
-adapter packages under `app/exchanges/`.
+The trading platform uses a pluggable adapter architecture for both prediction-market
+exchanges and stock brokers. The core system (strategies, decision engine, risk manager,
+portfolio tracker) is asset-agnostic and operates on normalized data models.
 
-## Supported Exchanges
+- Prediction market adapters live in `app/exchanges/`
+- Stock broker adapters live in `app/brokers/`
+
+## Supported Exchanges and Brokers
+
+### Prediction Markets
 
 | Exchange    | Status | Config Value  | Auth Method           |
 |-------------|--------|---------------|-----------------------|

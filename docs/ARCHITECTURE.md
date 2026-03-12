@@ -2,7 +2,33 @@
 
 ## Overview
 
-The system follows a clean, modular architecture with explicit dependencies between components. Each module has a single responsibility and communicates through well-defined data models.
+$alazar-Trader is a multi-asset trading platform with a web GUI. The architecture has five major layers:
+
+1. **Trading Core** — data ingestion, features, strategies, ML, NLP, decision engine, risk, execution, portfolio
+2. **Exchange/Broker Adapters** — Polymarket, Kalshi (prediction markets), Alpaca (stocks)
+3. **Control API Backend** — FastAPI server managing the bot lifecycle, config, and streaming
+4. **Web GUI Frontend** — React dashboard with real-time updates via WebSocket
+5. **Docker Orchestration** — Docker Compose with backend, frontend, and optional standalone bot
+
+### Platform Architecture
+
+```
+Browser (Desktop/Mobile)
+    │
+    ▼
+nginx (frontend container, port 3000)
+    ├── /* → React static files
+    ├── /api/* → proxy to backend:8000
+    └── /ws/* → proxy to backend:8000 (WebSocket)
+
+FastAPI Backend (port 8000)
+    ├── BotManager → TradingBot (async task)
+    │       ├── Exchange Adapters (Polymarket, Kalshi)
+    │       └── Broker Adapters (Alpaca)
+    ├── REST endpoints (status, config, portfolio, risk)
+    ├── WebSocket endpoints (logs, status, portfolio)
+    └── SQLite Repository
+```
 
 The bot uses **three coordinated intelligence layers** for decision-making, combined through a transparent ensemble decision engine, with deterministic risk controls that can never be overridden by AI.
 

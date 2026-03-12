@@ -1,75 +1,75 @@
-x-common: &common
-  image: ghcr.io/salazj/salazar-trader:${IMAGE_TAG:-latest}
-  build: .
-  env_file: .env
-  restart: unless-stopped
-  volumes:
-    - ./data:/app/data
-    - ./logs:/app/logs
-    - ./model_artifacts:/app/model_artifacts
-    - ./reports:/app/reports
+x-common-volumes: &common-volumes
+  - ./data:/app/data
+  - ./logs:/app/logs
+  - ./model_artifacts:/app/model_artifacts
+  - ./reports:/app/reports
 
 services:
-  # ── Main bot (dry-run by default) ──────────────────────────────────
+  # ── Backend (FastAPI + BotManager) ─────────────────────────────────
+  backend:
+    build: .
+    container_name: salazar-backend
+    env_file: .env
+    restart: unless-stopped
+    command: ["api"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes: *common-volumes
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+  # ── Frontend (React served by nginx, proxies to backend) ───────────
+  frontend:
+    build: ./frontend
+    container_name: salazar-frontend
+    restart: unless-stopped
+    ports:
+      - "${GUI_PORT:-3000}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ── Legacy standalone bot (for CLI usage without GUI) ──────────────
   bot:
-    <<: *common
+    build: .
     container_name: salazar-trader
-    environment:
-      - BOT_MODE=dry-run
-      - DRY_RUN=true
-      - ENABLE_LIVE_TRADING=false
-      - LIVE_TRADING_ACKNOWLEDGED=false
+    env_file: .env
+    restart: unless-stopped
+    command: ["bot"]
+    volumes: *common-volumes
     ports:
       - "${HEALTH_PORT:-8880}:8880"
-    command: ["bot"]
+    profiles:
+      - standalone
 
   # ── Backtest runner (one-shot) ─────────────────────────────────────
   backtest:
-    <<: *common
+    build: .
     container_name: salazar-trader-backtest
+    env_file: .env
     restart: "no"
     environment:
       - BOT_MODE=backtest
       - DRY_RUN=true
+    volumes: *common-volumes
     profiles:
       - tools
     command: ["backtest"]
 
-  # ── Replay runner (one-shot) ───────────────────────────────────────
-  replay:
-    <<: *common
-    container_name: salazar-trader-replay
-    restart: "no"
-    environment:
-      - BOT_MODE=replay
-      - DRY_RUN=true
-    profiles:
-      - tools
-    command: ["replay", "--input", "/app/data/session.jsonl"]
-
-  # ── NLP replay (one-shot) ──────────────────────────────────────────
-  nlp-replay:
-    <<: *common
-    container_name: salazar-trader-nlp-replay
-    restart: "no"
-    environment:
-      - BOT_MODE=replay
-      - DRY_RUN=true
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    profiles:
-      - tools
-    command: ["nlp-replay"]
-
   # ── Model training (one-shot) ──────────────────────────────────────
   train:
-    <<: *common
+    build: .
     container_name: salazar-trader-train
+    env_file: .env
     restart: "no"
     environment:
       - BOT_MODE=train
       - DRY_RUN=true
+    volumes: *common-volumes
     profiles:
       - tools
     command: ["train"]

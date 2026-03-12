@@ -51,8 +51,14 @@ class Settings(BaseSettings):
     # Third gate: explicit acknowledgement required for live trading
     live_trading_acknowledged: bool = False
 
-    # --- Exchange Selection ---
+    # --- Asset Class ---
+    asset_class: str = "prediction_markets"
+
+    # --- Exchange Selection (prediction markets) ---
     exchange: str = "polymarket"
+
+    # --- Broker Selection (equities) ---
+    broker: str = ""
 
     # --- Polymarket API ---
     polymarket_host: str = "https://clob.polymarket.com"
@@ -74,7 +80,12 @@ class Settings(BaseSettings):
     kalshi_ws_url: str = "wss://trading-api.kalshi.com/trade-api/ws/v2"
     kalshi_demo_mode: bool = True
 
-    # --- Risk Limits ---
+    # --- Alpaca (Stock Broker) ---
+    alpaca_api_key: str = ""
+    alpaca_secret_key: str = ""
+    alpaca_paper: bool = True
+
+    # --- Risk Limits (Prediction Markets) ---
     max_position_per_market: float = Field(default=10.0, ge=0)
     max_total_exposure: float = Field(default=50.0, ge=0)
     max_daily_loss: float = Field(default=10.0, ge=0)
@@ -139,6 +150,23 @@ class Settings(BaseSettings):
     watchlist_cooldown_seconds: float = Field(default=600.0, ge=0.0)
     universe_mode: str = "auto"
 
+    # --- Stock Universe Selection ---
+    stock_universe_mode: str = "manual"
+    stock_tickers: str = ""
+    stock_min_volume: int = 100000
+    stock_min_price: float = 5.0
+    stock_max_price: float = 500.0
+    stock_sector_include: str = ""
+    max_stock_symbols: int = 20
+    allow_extended_hours: bool = False
+
+    # --- Stock Risk Limits ---
+    stock_max_position_dollars: float = Field(default=1000.0, ge=0)
+    stock_max_portfolio_dollars: float = Field(default=10000.0, ge=0)
+    stock_max_daily_loss_dollars: float = Field(default=500.0, ge=0)
+    stock_max_open_positions: int = Field(default=10, ge=1)
+    stock_max_orders_per_minute: int = Field(default=10, ge=1)
+
     # --- Storage ---
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'salazar-trader.db'}"
 
@@ -165,6 +193,15 @@ class Settings(BaseSettings):
         v = v.upper()
         if v not in allowed:
             raise ValueError(f"log_level must be one of {allowed}")
+        return v
+
+    @field_validator("asset_class")
+    @classmethod
+    def validate_asset_class(cls, v: str) -> str:
+        allowed = {"prediction_markets", "equities"}
+        v = v.lower()
+        if v not in allowed:
+            raise ValueError(f"asset_class must be one of {allowed}")
         return v
 
     @field_validator("exchange")
@@ -234,7 +271,13 @@ class Settings(BaseSettings):
         return bool(self.kalshi_api_key and (self.kalshi_private_key or self.kalshi_private_key_path))
 
     @property
+    def has_alpaca_credentials(self) -> bool:
+        return bool(self.alpaca_api_key and self.alpaca_secret_key)
+
+    @property
     def has_credentials(self) -> bool:
+        if self.asset_class == "equities":
+            return self.has_alpaca_credentials
         if self.exchange == "kalshi":
             return self.has_kalshi_credentials
         return self.has_polymarket_credentials
@@ -270,16 +313,16 @@ class Settings(BaseSettings):
         self.require_live_trading()
 
     def __repr__(self) -> str:
-        """Override repr to redact secrets."""
+        """Override repr to redact secrets — omits secret fields entirely."""
         _SECRETS = {
             "private_key", "poly_api_key", "poly_api_secret", "poly_passphrase",
             "llm_api_key", "kalshi_api_key", "kalshi_private_key", "kalshi_private_key_path",
-            "newsapi_key",
+            "newsapi_key", "alpaca_api_key", "alpaca_secret_key",
         }
         safe_fields = {
-            k: ("***" if k in _SECRETS and v else v)
+            k: v
             for k, v in self.__dict__.items()
-            if not k.startswith("_")
+            if not k.startswith("_") and k not in _SECRETS
         }
         return f"Settings({safe_fields})"
 
