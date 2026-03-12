@@ -83,7 +83,8 @@ class KalshiExecutionClient(BaseExecutionClient):
     def _auth_headers(self, method: str, path: str) -> dict[str, str]:
         if self._auth is None:
             return {}
-        return self._auth.sign_request(method, path)
+        full_path = "/trade-api/v2" + path
+        return self._auth.sign_request(method, full_path)
 
     @retry(
         stop=stop_after_attempt(MAX_RETRIES),
