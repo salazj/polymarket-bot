@@ -476,7 +476,8 @@ export default function Config() {
                 className="w-full bg-input border rounded-md px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 <option value="none">None</option>
-                <option value="openai">OpenAI (GPT-4o-mini)</option>
+                <option value="hosted_api">Hosted API (OpenAI, Groq, Together)</option>
+                <option value="local_open_source">Local Open-Source (vLLM, Ollama)</option>
               </select>
             </FormField>
           </div>
