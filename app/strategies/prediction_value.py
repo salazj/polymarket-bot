@@ -51,6 +51,14 @@ class PredictionValueStrategy(BaseStrategy):
     ) -> Signal | None:
         mid = features.mid_price
         if mid is None or mid <= 0:
+            logger.debug(
+                "prediction_value_skip_no_mid",
+                market_id=features.market_id,
+                instrument_id=features.instrument_id,
+                mid=mid,
+                bid=features.best_bid,
+                ask=features.best_ask,
+            )
             return None
 
         bid = features.best_bid
@@ -62,6 +70,18 @@ class PredictionValueStrategy(BaseStrategy):
         history.append(mid)
         if len(history) > self._max_history:
             history.pop(0)
+
+        logger.debug(
+            "prediction_value_eval",
+            market_id=features.market_id,
+            instrument_id=iid,
+            mid=mid,
+            bid=bid,
+            ask=ask,
+            spread=spread,
+            extreme_low=mid < EXTREME_LOW,
+            extreme_high=mid > EXTREME_HIGH,
+        )
 
         if spread is not None and (spread < MIN_SPREAD or spread > MAX_SPREAD):
             return None
