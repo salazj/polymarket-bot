@@ -58,3 +58,6 @@ frontend/dist/
 
 .DS_Store
 Mail Attachment-2
+
+# Private container scripts (not for public use)
+my-*.sh

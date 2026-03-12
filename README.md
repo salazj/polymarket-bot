@@ -10,8 +10,6 @@ A multi-asset trading platform with a **web GUI**, supporting **prediction marke
 | Prediction Markets | Kalshi | `ASSET_CLASS=prediction_markets` `EXCHANGE=kalshi` |
 | Equities | Alpaca | `ASSET_CLASS=equities` `BROKER=alpaca` |
 
-Pre-built images are available for **linux/amd64** and **linux/arm64** (Intel/AMD and Apple Silicon / ARM servers).
-
 ---
 
 ## Quick Start
@@ -58,13 +56,13 @@ ALPACA_SECRET_KEY=your-secret
 ALPACA_PAPER=true
 ```
 
-### 2. Launch
+### 2. Build and launch
 
 ```bash
 ./start.sh
 ```
 
-This pulls the latest images, starts the backend + frontend, and tails the backend logs so you can see everything live. Press `Ctrl+C` to detach from the logs (containers keep running).
+This builds the backend and frontend images from source, starts both containers, and tails the backend logs live. Press `Ctrl+C` to detach from the logs (containers keep running).
 
 | Container | Port | Description |
 |-----------|------|-------------|
@@ -100,13 +98,13 @@ Stops the containers but keeps them. Run `./start.sh` to restart.
 ./remove.sh
 ```
 
-Stops and removes both containers and the Docker network. Optionally removes the images too. Run `./start.sh` to pull fresh and start again.
+Stops and removes containers, networks, and volumes. Optionally removes the built images too. Run `./start.sh` to rebuild from source.
 
-### 6. Update to latest version
+### 6. Update after code changes
 
 ```bash
-./remove.sh      # tear down old containers
-./start.sh       # pulls latest images and starts fresh
+git pull
+./start.sh       # rebuilds from latest source
 ```
 
 ---
@@ -262,22 +260,6 @@ The decision engine combines signals from all three layers with configurable beh
 
 ---
 
-## Docker Images
-
-| Image | Source | Description |
-|-------|--------|-------------|
-| `salazj16/salazar-trader` | Docker Hub | Backend (FastAPI + bot) |
-| `ghcr.io/salazj/salazar-trader-frontend` | GHCR | Frontend (React + nginx) |
-
-Pull individually if needed:
-
-```bash
-docker pull salazj16/salazar-trader:latest
-docker pull ghcr.io/salazj/salazar-trader-frontend:latest
-```
-
----
-
 ## Docker Compose Services
 
 | Service | Command | Profile | Purpose |
@@ -296,14 +278,14 @@ Three scripts in the repo root handle the full container lifecycle:
 
 | Script | What it does |
 |--------|-------------|
-| `./start.sh` | Pull latest images, start backend + frontend, tail backend logs |
-| `./stop.sh` | Stop both containers (keeps them for quick restart) |
-| `./remove.sh` | Stop, remove containers + network, optionally delete images |
+| `./start.sh` | Build from source, start backend + frontend, tail backend logs |
+| `./stop.sh` | Stop and remove containers |
+| `./remove.sh` | Full teardown: containers, volumes, optionally images |
 
 ```bash
-./start.sh       # pull + run + show logs (Ctrl+C to detach)
-./stop.sh        # pause
-./start.sh       # restart (re-pulls latest)
+./start.sh       # build + run + show logs (Ctrl+C to detach)
+./stop.sh        # stop
+./start.sh       # rebuild and restart
 ./remove.sh      # full cleanup
 ```
 
@@ -384,22 +366,11 @@ docker compose ps
 If you prefer CLI-only operation without the web GUI:
 
 ```bash
-# Using Docker Compose with the standalone profile
-docker compose --profile standalone up bot
-
-# Or using the image directly
-docker run -d --name salazar-trader \
-  --restart unless-stopped \
-  --env-file .env \
-  -v ./data:/app/data \
-  -v ./logs:/app/logs \
-  -v ./model_artifacts:/app/model_artifacts \
-  -v ./reports:/app/reports \
-  -p 8880:8880 \
-  salazj16/salazar-trader:latest bot
+# Build from source and run the standalone bot profile
+docker compose -f docker-compose.yml -f docker-compose.build.yml --profile standalone up --build bot
 ```
 
-Note the `bot` command at the end — this runs the standalone bot without the API server.
+This runs the bot directly without the API server or web GUI.
 
 ---
 
@@ -477,11 +448,10 @@ cd salazar-trader
 cp .env.example .env
 nano .env  # set your credentials
 
-# Pull and launch
+# Build from source and launch
 ./start.sh
 
-# Access the GUI
-# http://<your-vm-ip>:3000
+# Access the GUI at http://<your-vm-ip>:3000
 ```
 
 Works on any architecture (Intel, AMD, ARM, Apple Silicon VMs). The GUI is responsive and works on phone browsers. For HTTPS, put a reverse proxy (Caddy, nginx) in front of port 3000.
@@ -538,9 +508,9 @@ These are mounted from the host. Data persists across container restarts.
 │   │   └── api/        API client and TypeScript types
 │   ├── Dockerfile      Multi-stage Node → nginx build
 │   └── nginx.conf      Reverse proxy config
-├── start.sh                 Pull latest images + start containers + tail logs
-├── stop.sh                  Stop containers
-├── remove.sh                Stop + remove containers + images
+├── start.sh                 Build from source + start containers + tail logs
+├── stop.sh                  Stop and remove containers
+├── remove.sh                Full teardown (containers + volumes + images)
 ├── docker-compose.yml       Compose orchestration (pull from registry)
 ├── docker-compose.build.yml Compose override to build from source
 ├── Dockerfile               Backend image

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(dirname "$0")"
+
 echo "==> Stopping containers..."
-docker stop salazar-backend salazar-frontend 2>/dev/null || true
-echo "    Containers stopped."
-echo "    Run ./start.sh to restart, or ./remove.sh to remove them entirely."
+docker compose down
+echo "    Done. Run ./start.sh to rebuild and restart."
