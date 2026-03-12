@@ -48,6 +48,17 @@ def decimal_to_cents(decimal_price: float) -> int:
 # ── Market normalizer ────────────────────────────────────────────────
 
 
+def _parse_dollar_price(raw: dict[str, Any], *keys: str) -> float | None:
+    """Extract the first non-zero dollar price from the given field names."""
+    for key in keys:
+        val = raw.get(key)
+        if val is not None:
+            fval = float(val)
+            if fval > 0:
+                return fval
+    return None
+
+
 def normalize_market(raw: dict[str, Any]) -> Market:
     """Parse a Kalshi market API response into a normalized Market."""
     ticker = raw.get("ticker", "")
@@ -55,9 +66,26 @@ def normalize_market(raw: dict[str, Any]) -> Market:
     subtitle = raw.get("subtitle", "")
     title = raw.get("title", raw.get("yes_sub_title", ""))
 
-    yes_price_raw = raw.get("yes_price", raw.get("last_price"))
-    yes_price = cents_to_decimal(yes_price_raw) if yes_price_raw is not None else 0.5
-    no_price = 1.0 - yes_price
+    uses_dollars = raw.get("response_price_units") == "usd_cent" or "yes_bid_dollars" in raw
+
+    if uses_dollars:
+        yes_price = _parse_dollar_price(
+            raw, "yes_bid_dollars", "last_price_dollars", "previous_price_dollars",
+        )
+        yes_ask = _parse_dollar_price(raw, "yes_ask_dollars")
+        volume = float(raw.get("volume_fp") or 0)
+        volume_24h = float(raw.get("volume_24h_fp") or 0)
+        open_interest = float(raw.get("open_interest_fp") or 0)
+    else:
+        yes_price_raw = raw.get("yes_bid") or raw.get("yes_price") or raw.get("last_price")
+        yes_price = cents_to_decimal(yes_price_raw) if yes_price_raw else None
+        yes_ask_raw = raw.get("yes_ask")
+        yes_ask = cents_to_decimal(yes_ask_raw) if yes_ask_raw else None
+        volume = float(raw.get("volume") or 0)
+        volume_24h = float(raw.get("volume_24h") or 0)
+        open_interest = float(raw.get("open_interest") or 0)
+
+    no_price = (1.0 - yes_price) if yes_price is not None else None
 
     tokens = [
         MarketToken(token_id=ticker, instrument_id=ticker, outcome="Yes"),
@@ -87,10 +115,11 @@ def normalize_market(raw: dict[str, Any]) -> Market:
             "event_ticker": event_ticker,
             "subtitle": subtitle,
             "yes_price": yes_price,
+            "yes_ask": yes_ask,
             "no_price": no_price,
-            "volume": raw.get("volume"),
-            "volume_24h": raw.get("volume_24h"),
-            "open_interest": raw.get("open_interest"),
+            "volume": volume,
+            "volume_24h": volume_24h,
+            "open_interest": open_interest,
             "status": status,
             "result": raw.get("result"),
             "category": raw.get("category"),
@@ -104,16 +133,22 @@ def normalize_market(raw: dict[str, Any]) -> Market:
 # ── Orderbook normalizer ─────────────────────────────────────────────
 
 
-def _parse_book_levels(raw_levels: list, descending: bool) -> list[PriceLevel]:
-    """Parse [[price_cents, size], …] into sorted PriceLevels."""
+def _parse_book_levels(raw_levels: list, descending: bool, *, is_dollars: bool = False) -> list[PriceLevel]:
+    """Parse [[price, size], …] into sorted PriceLevels."""
     levels: list[PriceLevel] = []
     for lvl in raw_levels:
         if isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
-            levels.append(PriceLevel(price=cents_to_decimal(lvl[0]), size=float(lvl[1])))
+            price = float(lvl[0])
+            size = float(lvl[1])
+            if not is_dollars:
+                price = cents_to_decimal(price)
+            levels.append(PriceLevel(price=price, size=size))
         elif isinstance(lvl, dict):
-            price = lvl.get("price", lvl.get("yes_price", 0))
-            size = lvl.get("quantity", lvl.get("size", lvl.get("count", 0)))
-            levels.append(PriceLevel(price=cents_to_decimal(price), size=float(size)))
+            price = float(lvl.get("price", lvl.get("yes_price", 0)))
+            size = float(lvl.get("quantity", lvl.get("size", lvl.get("count", 0))))
+            if not is_dollars:
+                price = cents_to_decimal(price)
+            levels.append(PriceLevel(price=price, size=size))
     levels.sort(key=lambda l: l.price, reverse=descending)
     return levels
 
@@ -121,12 +156,15 @@ def _parse_book_levels(raw_levels: list, descending: bool) -> list[PriceLevel]:
 def normalize_orderbook(ticker: str, raw: dict[str, Any]) -> OrderbookSnapshot:
     """Parse a Kalshi orderbook response into a normalized OrderbookSnapshot.
 
-    Kalshi returns ``{"yes": [[price, size], …], "no": [[price, size], …]}``.
-    We treat `yes` levels as bids (buyers of YES) and `no` levels as asks
-    (sellers of YES / buyers of NO).
+    Kalshi API v2 uses ``{"yes_dollars": [...], "no_dollars": [...]}`` (dollar format)
+    or legacy ``{"yes": [...], "no": [...]}`` (cents format).
     """
-    bids = _parse_book_levels(raw.get("yes", raw.get("bids", [])), descending=True)
-    asks = _parse_book_levels(raw.get("no", raw.get("asks", [])), descending=False)
+    is_dollars = "yes_dollars" in raw or "no_dollars" in raw
+    yes_key = "yes_dollars" if is_dollars else "yes"
+    no_key = "no_dollars" if is_dollars else "no"
+
+    bids = _parse_book_levels(raw.get(yes_key, raw.get("bids", [])), descending=True, is_dollars=is_dollars)
+    asks = _parse_book_levels(raw.get(no_key, raw.get("asks", [])), descending=False, is_dollars=is_dollars)
 
     return OrderbookSnapshot(
         market_id=ticker,
@@ -214,8 +252,15 @@ def normalize_orderbook_delta(
 def normalize_trade(raw: dict[str, Any]) -> Trade:
     """Parse a Kalshi trade payload into a normalized Trade."""
     ticker = raw.get("market_ticker", raw.get("ticker", ""))
-    price_raw = raw.get("yes_price", raw.get("price", 50))
-    count = raw.get("count", raw.get("size", raw.get("quantity", 0)))
+
+    price_dollars = raw.get("yes_price_dollars")
+    if price_dollars is not None:
+        price_raw = float(price_dollars) * 100
+    else:
+        price_raw = raw.get("yes_price", raw.get("price", 50))
+
+    count_raw = raw.get("count_fp", raw.get("count", raw.get("size", raw.get("quantity", 0))))
+    count = float(count_raw) if count_raw else 0
 
     taker_side = raw.get("taker_side", raw.get("side", "")).lower()
     if taker_side in ("yes", "buy"):

@@ -291,7 +291,7 @@ class KalshiMarketDataClient(BaseMarketDataClient):
     async def get_orderbook(self, instrument_id: str) -> dict[str, Any]:
         ticker = instrument_id.rstrip("-no")
         data = await self._get(f"/markets/{ticker}/orderbook")
-        raw = data.get("orderbook", data)
+        raw = data.get("orderbook_fp", data.get("orderbook", data))
         book = normalize_orderbook(ticker, raw)
         return book.model_dump()
 
@@ -300,9 +300,12 @@ class KalshiMarketDataClient(BaseMarketDataClient):
             ticker = instrument_id.rstrip("-no")
             data = await self._get(f"/markets/{ticker}")
             raw = data.get("market", data)
-            yes_price = raw.get("yes_price", raw.get("last_price"))
-            if yes_price is not None:
-                return cents_to_decimal(yes_price)
+            for field in ("yes_bid_dollars", "last_price_dollars", "yes_price", "last_price"):
+                val = raw.get(field)
+                if val is not None:
+                    fval = float(val)
+                    if fval > 0:
+                        return fval if "dollars" in field else cents_to_decimal(fval)
             return None
         except Exception:
             return None
