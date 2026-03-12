@@ -49,7 +49,7 @@ export function Sidebar() {
           ))}
         </nav>
         <div className="border-t px-4 py-3">
-          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest">v3.0.0</p>
+          <p className="text-[10px] text-muted-foreground/50 uppercase tracking-widest">v3.1.0</p>
         </div>
       </aside>
 
