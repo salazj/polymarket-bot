@@ -221,7 +221,7 @@ class BotManager:
                     size=o.size,
                     filled_size=o.filled_size,
                     status=o.status.value,
-                    created_at=o.created_at.isoformat(),
+                    created_at=o.created_at.isoformat() if hasattr(o.created_at, "isoformat") else str(o.created_at),
                 )
                 for o in orders
             ]
