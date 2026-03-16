@@ -42,6 +42,8 @@ from app.nlp.providers.newsapi import NewsApiProvider
 from app.nlp.providers.rss import RssProvider
 from app.nlp.providers.google_news import GoogleNewsProvider
 from app.nlp.providers.finnhub import FinnhubProvider
+from app.nlp.providers.sports_data import SportsDataProvider
+from app.nlp.sports_context import SportsContextCache
 from app.portfolio.tracker import PortfolioTracker
 from app.risk.manager import RiskManager
 from app.storage.repository import Repository
@@ -130,6 +132,9 @@ class TradingBot:
 
         self._news_service.set_market_provider(lambda: self._active_markets)
 
+        # Sports data provider reference (set during _build_provider if configured)
+        self._sports_provider: SportsDataProvider | None = None
+
         # LLM Market Analyzers — GPT and Claude probability assessment
         self._llm_analyzer: LLMMarketAnalyzer | None = None
         self._claude_analyzer: ClaudeMarketAnalyzer | None = None
@@ -169,6 +174,17 @@ class TradingBot:
                 "claude_market_analyzer_enabled",
                 model=self._settings.claude_model_name,
             )
+
+        # Wire sports context into LLM analyzers for enriched prompts
+        if self._sports_provider is not None:
+            self._sports_context = SportsContextCache()
+            if self._llm_analyzer:
+                self._llm_analyzer.sports_cache = self._sports_context
+            if self._claude_analyzer:
+                self._claude_analyzer.sports_cache = self._sports_context
+            logger.info("sports_context_wired", analyzers_connected=True)
+        else:
+            self._sports_context: SportsContextCache | None = None
 
         # Universe selection (upstream from strategy execution)
         self._universe = UniverseManager(self._settings, self._adapter.market_data)
@@ -395,6 +411,18 @@ class TradingBot:
             return GoogleNewsProvider()
         if name == "finnhub":
             return FinnhubProvider(api_key=self._settings.finnhub_api_key)
+        if name in ("sports", "betstack"):
+            leagues = [
+                l.strip()
+                for l in self._settings.sports_leagues.split(",")
+                if l.strip()
+            ]
+            provider = SportsDataProvider(
+                api_key=self._settings.betstack_api_key,
+                leagues=leagues,
+            )
+            self._sports_provider = provider
+            return provider
         if name == "none":
             return None
         logger.warning("unknown_nlp_provider", name=name)
@@ -820,6 +848,12 @@ class TradingBot:
                 if not gpt_due and not claude_due:
                     await asyncio.sleep(10)
                     continue
+
+                # Refresh sports context from latest BetStack data
+                if self._sports_context and self._sports_provider:
+                    raw_events = self._sports_provider.events_cache
+                    if raw_events:
+                        self._sports_context.update(raw_events)
 
                 news_headlines: list[str] = []
                 for sig in self._news_service.get_latest_signals():

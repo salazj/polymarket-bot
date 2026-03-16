@@ -8,6 +8,7 @@ The score reflects the quality of a trading opportunity, factoring in:
   - Trade flow / activity
   - Volatility regime (moderate is best)
   - Market activity (more recent trades = better)
+  - Time urgency (markets expiring soon score higher)
   - NLP/news relevance (optional)
   - ML model confidence (optional)
   - Estimated edge after fees/slippage
@@ -16,6 +17,7 @@ The score reflects the quality of a trading opportunity, factoring in:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from app.data.models import Market, OrderbookSnapshot
@@ -39,11 +41,12 @@ class ScoredMarket:
 @dataclass
 class ScorerWeights:
     spread_quality: float = 0.20
-    liquidity_depth: float = 0.20
+    liquidity_depth: float = 0.15
     momentum: float = 0.10
     trade_flow: float = 0.15
     volatility_regime: float = 0.10
-    market_activity: float = 0.15
+    market_activity: float = 0.10
+    time_urgency: float = 0.10
     category_bonus: float = 0.05
     edge_estimate: float = 0.05
 
@@ -79,6 +82,7 @@ class OpportunityScorer:
         components["trade_flow"] = self._score_trade_flow(meta)
         components["volatility_regime"] = self._score_volatility(meta)
         components["market_activity"] = self._score_activity(meta)
+        components["time_urgency"] = self._score_time_urgency(market)
         components["category_bonus"] = self._score_category(market)
         components["edge_estimate"] = self._score_edge(meta)
 
@@ -90,6 +94,7 @@ class OpportunityScorer:
             + components["trade_flow"] * w.trade_flow
             + components["volatility_regime"] * w.volatility_regime
             + components["market_activity"] * w.market_activity
+            + components["time_urgency"] * w.time_urgency
             + components["category_bonus"] * w.category_bonus
             + components["edge_estimate"] * w.edge_estimate
         )
@@ -159,6 +164,42 @@ class OpportunityScorer:
         volume = meta.get("volume_24h", meta.get("volume", 0)) or 0
         activity = float(trade_count) + float(volume) / 1000.0
         return min(1.0, activity / 20.0)
+
+    def _score_time_urgency(self, market: Market) -> float:
+        """Boost markets expiring soon — live events get highest priority."""
+        end_date = getattr(market, "end_date", None)
+        if not end_date:
+            return 0.1
+
+        try:
+            if isinstance(end_date, str):
+                clean = end_date.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(clean)
+            elif isinstance(end_date, datetime):
+                dt = end_date
+            else:
+                return 0.1
+
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            hours = (dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
+        except (ValueError, TypeError):
+            return 0.1
+
+        if hours <= 0:
+            return 0.0
+        if hours <= 3:
+            return 1.0
+        if hours <= 12:
+            return 0.8
+        if hours <= 24:
+            return 0.6
+        if hours <= 72:
+            return 0.4
+        if hours <= 168:
+            return 0.2
+        return 0.1
 
     def _score_category(self, market: Market) -> float:
         cat = _get_category(market)

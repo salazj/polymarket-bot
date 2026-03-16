@@ -23,6 +23,7 @@ import httpx
 from app.data.models import Market
 from app.monitoring import get_logger
 from app.nlp.signals import NlpSignal, SentimentDirection
+from app.nlp.sports_context import SportsContextCache
 from app.utils.helpers import utc_now
 
 logger = get_logger(__name__)
@@ -149,6 +150,7 @@ def _build_market_prompt(
     yes_price: float,
     news_context: list[str],
     end_date: str | None = None,
+    sports_context: str | None = None,
 ) -> str:
     parts = [
         f"Market question: {question}",
@@ -157,11 +159,14 @@ def _build_market_prompt(
     if end_date:
         parts.append(f"Resolution date: {end_date}")
 
+    if sports_context:
+        parts.append(sports_context)
+
     if news_context:
         parts.append("\nRecent relevant news:")
         for i, headline in enumerate(news_context[:5], 1):
             parts.append(f"  {i}. {headline[:200]}")
-    else:
+    elif not sports_context:
         parts.append("\nNo specific recent news available for this market.")
 
     parts.append(
@@ -195,6 +200,7 @@ class LLMMarketAnalyzer:
         self._min_bet_size = min_bet_size
         self._cost_multiplier = cost_multiplier
         self.cache = AnalysisCache(ttl=cache_ttl, price_threshold=cache_price_threshold)
+        self.sports_cache: SportsContextCache | None = None
         self.api_calls: int = 0
         self.skipped_cost_gate: int = 0
         self.cache_hits: int = 0
@@ -340,7 +346,20 @@ class LLMMarketAnalyzer:
 
         relevant_news = _filter_relevant_headlines(question, headlines)
 
-        prompt = _build_market_prompt(question, yes_price, relevant_news, end_str)
+        sports_text: str | None = None
+        category = (ed.get("category") or "").lower()
+        if category == "sports" and self.sports_cache:
+            ctx = self.sports_cache.find_context(question, yes_price)
+            if ctx:
+                sports_text = ctx.prompt_text
+                logger.info(
+                    "llm_sports_context_injected",
+                    market_id=market.market_id,
+                    event=f"{ctx.event.away_team}@{ctx.event.home_team}",
+                    match_score=round(ctx.match_score, 2),
+                )
+
+        prompt = _build_market_prompt(question, yes_price, relevant_news, end_str, sports_text)
 
         payload = {
             "model": self._model,
@@ -470,6 +489,7 @@ class ClaudeMarketAnalyzer:
         self._min_bet_size = min_bet_size
         self._cost_multiplier = cost_multiplier
         self.cache = AnalysisCache(ttl=cache_ttl, price_threshold=cache_price_threshold)
+        self.sports_cache: SportsContextCache | None = None
         self.api_calls: int = 0
         self.skipped_cost_gate: int = 0
         self.cache_hits: int = 0
@@ -610,7 +630,21 @@ class ClaudeMarketAnalyzer:
         end_str = str(end_date) if end_date else None
 
         relevant_news = _filter_relevant_headlines(question, headlines)
-        prompt = _build_market_prompt(question, yes_price, relevant_news, end_str)
+
+        sports_text: str | None = None
+        category = (ed.get("category") or "").lower()
+        if category == "sports" and self.sports_cache:
+            ctx = self.sports_cache.find_context(question, yes_price)
+            if ctx:
+                sports_text = ctx.prompt_text
+                logger.info(
+                    "claude_sports_context_injected",
+                    market_id=market.market_id,
+                    event=f"{ctx.event.away_team}@{ctx.event.home_team}",
+                    match_score=round(ctx.match_score, 2),
+                )
+
+        prompt = _build_market_prompt(question, yes_price, relevant_news, end_str, sports_text)
 
         payload = {
             "model": self._model,

@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     rss_feed_urls: str = ""
     finnhub_api_key: str = ""
 
+    # --- Sports Data (BetStack API) ---
+    betstack_api_key: str = ""
+    sports_leagues: str = "americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl"
+
     # --- LLM / AI Provider ---
     # "none" (default), "local_open_source", "hosted_api"
     llm_provider: str = "none"
