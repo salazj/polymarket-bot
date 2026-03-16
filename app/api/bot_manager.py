@@ -389,7 +389,7 @@ class BotManager:
             if config.broker not in ("alpaca",):
                 errors.append(f"Invalid broker: {config.broker}")
 
-        if config.decision_mode not in ("conservative", "balanced", "aggressive"):
+        if config.decision_mode not in ("conservative", "moderate", "balanced", "aggressive"):
             errors.append(f"Invalid decision_mode: {config.decision_mode}")
 
         weight_sum = config.ensemble_weight_l1 + config.ensemble_weight_l2 + config.ensemble_weight_l3

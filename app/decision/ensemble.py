@@ -31,6 +31,7 @@ from app.utils.helpers import utc_now
 
 class DecisionMode(str, Enum):
     CONSERVATIVE = "conservative"
+    MODERATE = "moderate"
     BALANCED = "balanced"
     AGGRESSIVE = "aggressive"
 
@@ -44,6 +45,15 @@ _MODE_DEFAULTS: dict[DecisionMode, dict[str, Any]] = {
         "large_trade_threshold": 3.0,
         "large_trade_min_layers": 2,
         "conflict_tolerance": 0.15,
+    },
+    DecisionMode.MODERATE: {
+        "min_confidence": 0.25,
+        "min_layers_agree": 1,
+        "require_l1_approval": False,
+        "min_evidence_signals": 1,
+        "large_trade_threshold": 5.0,
+        "large_trade_min_layers": 2,
+        "conflict_tolerance": 0.25,
     },
     DecisionMode.BALANCED: {
         "min_confidence": 0.25,
@@ -278,7 +288,22 @@ def run_ensemble(
     trace.weighted_scores = weighted_scores
 
     direction = 1 if net_score > 0 else (-1 if net_score < 0 else 0)
-    confidence = min(abs(net_score), 1.0)
+
+    # abs(net_score) can be near-zero when a layer produces many neutral
+    # signals alongside a few directional ones (common with keyword NLP).
+    # Fall back to the renormalized mean confidence of directional layers
+    # so a single clear signal isn't drowned out by neutral noise.
+    score_confidence = abs(net_score)
+    if direction != 0:
+        directional_confs = [
+            s.mean_confidence * renorm.get(k, 0.0)
+            for k, s in [("l1", s1), ("l2", s2), ("l3", s3)]
+            if s.signal_count > 0 and s.direction == direction
+        ]
+        layer_confidence = sum(directional_confs) if directional_confs else 0.0
+        score_confidence = max(score_confidence, layer_confidence)
+
+    confidence = min(score_confidence, 1.0)
 
     trace.ensemble_direction = direction
     trace.ensemble_confidence = confidence

@@ -247,7 +247,7 @@ class Settings(BaseSettings):
     @field_validator("decision_mode")
     @classmethod
     def validate_decision_mode(cls, v: str) -> str:
-        allowed = {"conservative", "balanced", "aggressive"}
+        allowed = {"conservative", "moderate", "balanced", "aggressive"}
         v = v.lower()
         if v not in allowed:
             raise ValueError(f"decision_mode must be one of {allowed}")
