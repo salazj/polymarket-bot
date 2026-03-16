@@ -32,7 +32,7 @@ from app.strategies.base import BaseStrategy, StrategyRegistry
 
 logger = get_logger(__name__)
 
-PREDICTION_THRESHOLD = 0.6
+PREDICTION_THRESHOLD = 0.55
 
 # Legacy bare-model feature columns (no preprocessing pipeline)
 LEGACY_FEATURE_COLUMNS = [
