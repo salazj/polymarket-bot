@@ -124,6 +124,10 @@ class SportsDataProvider(BaseNlpProvider):
     def _event_to_news_item(self, event: dict[str, Any]) -> NewsItem | None:
         home = event.get("home_team", "")
         away = event.get("away_team", "")
+        if isinstance(home, dict):
+            home = home.get("name", "") or ""
+        if isinstance(away, dict):
+            away = away.get("name", "") or ""
         if not home or not away:
             return None
 

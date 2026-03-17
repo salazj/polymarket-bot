@@ -149,6 +149,12 @@ class MarketFilter:
         if volume is None:
             volume = 0.0
         if self._config.min_volume > 0 and float(volume) < self._config.min_volume:
+            category = (metadata.get("category") or "").lower()
+            if category == "sports":
+                return FilterResult(True)
+            market_id = metadata.get("market_id", "")
+            if isinstance(market_id, str) and market_id.startswith("KXMVESPORTS"):
+                return FilterResult(True)
             return FilterResult(False, f"insufficient_volume:{volume}")
         return FilterResult(True)
 

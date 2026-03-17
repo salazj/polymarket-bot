@@ -22,6 +22,16 @@ from app.utils.helpers import utc_now
 logger = get_logger(__name__)
 
 
+_SPORTS_PREFIXES = (
+    "KXMVESPORTS", "KXNCAAF", "KXNFL", "KXNBA", "KXNHL", "KXMLB",
+    "KXUFC", "KXMMA", "KXSOCCER",
+)
+
+# Kalshi pagination is non-deterministic for KXMVESPORTS* markets.
+# Don't mark them resolved unless missing for several consecutive scans.
+_SPORTS_GRACE_SCANS = 5
+
+
 class UniverseScanner:
     """Discovers and tracks the full market universe from the exchange."""
 
@@ -31,6 +41,7 @@ class UniverseScanner:
         self._last_scan: datetime | None = None
         self._newly_listed: list[str] = []
         self._resolved: list[str] = []
+        self._missing_count: dict[str, int] = {}
 
     @property
     def known_markets(self) -> dict[str, Market]:
@@ -75,18 +86,28 @@ class UniverseScanner:
                 )
 
             self._known_markets[mid] = market
+            self._missing_count.pop(mid, None)
 
         for mid in list(self._known_markets):
             if mid not in incoming_ids:
                 existing = self._known_markets[mid]
-                if existing.active:
-                    existing.active = False
-                    self._resolved.append(mid)
-                    logger.info(
-                        "market_resolved",
-                        market_id=mid,
-                        question=existing.question[:80],
-                    )
+                if not existing.active:
+                    continue
+
+                is_sports = any(mid.startswith(p) for p in _SPORTS_PREFIXES)
+                self._missing_count[mid] = self._missing_count.get(mid, 0) + 1
+
+                if is_sports and self._missing_count[mid] < _SPORTS_GRACE_SCANS:
+                    continue
+
+                existing.active = False
+                self._resolved.append(mid)
+                self._missing_count.pop(mid, None)
+                logger.info(
+                    "market_resolved",
+                    market_id=mid,
+                    question=existing.question[:80],
+                )
 
         self._last_scan = now
 

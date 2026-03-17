@@ -100,10 +100,14 @@ def normalize_market(raw: dict[str, Any]) -> Market:
 
     close_time = raw.get("close_time") or raw.get("expiration_time")
 
+    question = title or subtitle or ticker
+    if ticker.startswith("KXMVESPORTS"):
+        question = _format_sports_parlay_question(question, ticker)
+
     return Market(
         condition_id=ticker,
         market_id=ticker,
-        question=title or subtitle or ticker,
+        question=question,
         slug=ticker.lower(),
         tokens=tokens,
         end_date=close_time,
@@ -128,6 +132,40 @@ def normalize_market(raw: dict[str, Any]) -> Market:
             "expiration_value": raw.get("expiration_value"),
         },
     )
+
+
+def _format_sports_parlay_question(raw_title: str, ticker: str) -> str:
+    """Turn Kalshi's KXMVESPORTS comma-separated legs into a readable question.
+
+    Input:  "yes CJ McCollum: 1+,yes Cooper Flagg: 15+,no Atlanta wins by over 3.5 Points"
+    Output: "Sports Parlay: CJ McCollum 1+ pts AND Cooper Flagg 15+ pts AND Atlanta does NOT win by over 3.5 Points"
+    """
+    legs = [leg.strip() for leg in raw_title.split(",") if leg.strip()]
+    readable: list[str] = []
+    teams: list[str] = []
+
+    for leg in legs:
+        if leg.lower().startswith("yes "):
+            text = leg[4:].strip()
+            readable.append(text)
+        elif leg.lower().startswith("no "):
+            text = leg[3:].strip()
+            readable.append(f"NOT {text}")
+        else:
+            readable.append(leg)
+
+        # Extract team names (simple heuristic: entries without ":" are teams)
+        clean = leg.lstrip("yes ").lstrip("no ").strip()
+        if ":" not in clean and "wins" not in clean.lower() and "over" not in clean.lower():
+            teams.append(clean)
+
+    if len(readable) <= 2:
+        desc = " AND ".join(readable)
+    else:
+        desc = ", ".join(readable[:-1]) + f", AND {readable[-1]}"
+
+    label = "Sports Bet" if len(readable) == 1 else f"Sports Parlay ({len(readable)} legs)"
+    return f"{label}: {desc}"
 
 
 # ── Orderbook normalizer ─────────────────────────────────────────────

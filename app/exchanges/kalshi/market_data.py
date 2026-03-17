@@ -118,6 +118,14 @@ class KalshiMarketDataClient(BaseMarketDataClient):
                     all_markets.append(m)
                     seen.add(m.market_id)
 
+        # Supplement with live sports markets (KXMVESPORTS*) which
+        # don't appear in the events API but exist via direct pagination
+        seen = {m.market_id for m in all_markets}
+        live_sports = await self._fetch_live_sports(seen)
+        all_markets.extend(live_sports)
+        if live_sports:
+            logger.info("kalshi_live_sports_added", count=len(live_sports))
+
         if cat_map:
             for market in all_markets:
                 event_ticker = (market.exchange_data or {}).get("event_ticker", "")
@@ -125,6 +133,14 @@ class KalshiMarketDataClient(BaseMarketDataClient):
                 if cat:
                     market.category = cat
                     market.exchange_data["category"] = cat
+
+        # Tag KXMVESPORTS markets as sports category
+        for market in all_markets:
+            ticker = market.market_id or ""
+            if ticker.startswith("KXMVESPORTS") and not market.category:
+                market.category = "sports"
+                if market.exchange_data:
+                    market.exchange_data["category"] = "sports"
 
         logger.info("kalshi_fetched_all_markets", total=len(all_markets))
         return all_markets
@@ -200,6 +216,64 @@ class KalshiMarketDataClient(BaseMarketDataClient):
             return [normalize_market(m) for m in raw_markets if not _is_parlay(m)]
         except Exception:
             return []
+
+    async def _fetch_live_sports(self, already_seen: set[str]) -> list[Market]:
+        """Fetch KXMVESPORTS* markets via direct pagination.
+
+        These are Kalshi's live event sports props (player stats, game
+        winners, spreads) which are not exposed via the events API.
+        We paginate through /markets and keep only the sports ones.
+
+        Only keeps short parlays (up to 4 legs) — anything longer is
+        essentially a lottery ticket the bot can't analyze intelligently.
+        """
+        sports_markets: list[Market] = []
+        cursor = ""
+        skipped_long = 0
+
+        for _ in range(15):
+            params: dict[str, Any] = {"limit": 100, "status": "open"}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                data = await self._get("/markets", params=params)
+            except Exception as e:
+                logger.warning("kalshi_live_sports_fetch_error", error=str(e))
+                break
+
+            raw_markets = data.get("markets", [])
+            for raw in raw_markets:
+                ticker = raw.get("ticker", "")
+                if not ticker.startswith("KXMVESPORTS"):
+                    continue
+                if ticker in already_seen:
+                    continue
+
+                title = raw.get("title", "") or raw.get("subtitle", "") or ""
+                leg_count = len([l for l in title.split(",") if l.strip()])
+                if leg_count > 4:
+                    skipped_long += 1
+                    continue
+
+                market = normalize_market(raw)
+                sports_markets.append(market)
+                already_seen.add(ticker)
+
+            cursor = data.get("cursor", "")
+            if not cursor:
+                break
+            if raw_markets and not any(
+                m.get("ticker", "").startswith("KXMVE") for m in raw_markets
+            ):
+                break
+
+        if skipped_long:
+            logger.info(
+                "kalshi_skipped_long_parlays",
+                skipped=skipped_long,
+                kept=len(sports_markets),
+            )
+        return sports_markets
 
     async def _fetch_via_pagination(self, max_markets: int) -> list[Market]:
         """Fallback: paginate through /markets directly."""
@@ -350,10 +424,14 @@ class KalshiMarketDataClient(BaseMarketDataClient):
             return []
 
 
-_PARLAY_PREFIXES = ("KXMVE", "KXCROSSCATEGORY", "KXPARLAY")
+_PARLAY_PREFIXES = ("KXMVECROSSCATEGORY", "KXMVECB", "KXCROSSCATEGORY", "KXPARLAY")
 
 
 def _is_parlay(raw: dict[str, Any]) -> bool:
-    """Return True for synthetic cross-category / parlay combo markets."""
+    """Return True for synthetic cross-category / parlay combo markets.
+
+    KXMVESPORTS* are Kalshi's live sports props (player stats, game
+    winners, point spreads) and are deliberately allowed through.
+    """
     ticker = raw.get("ticker", "")
     return any(ticker.startswith(p) for p in _PARLAY_PREFIXES)

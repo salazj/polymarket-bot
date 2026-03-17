@@ -101,6 +101,10 @@ class OpportunityScorer:
 
         total = max(0.0, min(1.0, total))
 
+        mid = market.market_id or ""
+        if mid.startswith("KXMVESPORTS"):
+            total = max(total, 0.30)
+
         return ScoredMarket(market=market, score=total, components=components)
 
     def score_batch(
@@ -166,7 +170,17 @@ class OpportunityScorer:
         return min(1.0, activity / 20.0)
 
     def _score_time_urgency(self, market: Market) -> float:
-        """Boost markets expiring soon — live events get highest priority."""
+        """Boost markets expiring soon — live events get highest priority.
+
+        KXMVESPORTS markets get a fixed high urgency score regardless of
+        their Kalshi close_time because their actual game resolution is
+        typically within hours, not the 14-day market window.
+        """
+        mid = market.market_id or ""
+        cat = _get_category(market)
+        if mid.startswith("KXMVESPORTS") or cat == "sports":
+            return 0.9
+
         end_date = getattr(market, "end_date", None)
         if not end_date:
             return 0.1

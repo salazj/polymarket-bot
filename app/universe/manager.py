@@ -231,6 +231,7 @@ class UniverseManager:
         """Extract scoring metadata from a market's exchange_data."""
         ed = market.exchange_data or {}
         return {
+            "market_id": market.market_id,
             "volume": ed.get("volume", 0),
             "volume_24h": ed.get("volume_24h", 0),
             "open_interest": ed.get("open_interest", 0),
@@ -239,7 +240,7 @@ class UniverseManager:
             "trade_count": ed.get("trade_count", 0),
             "momentum": ed.get("momentum", 0),
             "volatility": ed.get("volatility", 0),
-            "category": ed.get("category", ""),
+            "category": ed.get("category", "") or getattr(market, "category", ""),
         }
 
     def _log_stats(

@@ -84,6 +84,9 @@ class WatchlistManager:
         """
         Update the watchlist based on new scored markets.
         Returns dict with 'added', 'removed', and 'retained' lists.
+
+        Reserves up to 30% of slots for sports/live-event markets so they
+        are not crowded out by higher-volume political/economic markets.
         """
         now = time.time()
         score_map = {sm.market_id: sm for sm in scored_markets}
@@ -101,10 +104,45 @@ class WatchlistManager:
 
         sorted_markets = sorted(scored_markets, key=lambda s: s.score, reverse=True)
 
+        # Split markets into live sports, futures sports, and general
+        live_sports = [sm for sm in sorted_markets if _is_live_sports(sm)]
+        futures_sports = [sm for sm in sorted_markets if _is_futures_sports(sm)]
+        general_sorted = [sm for sm in sorted_markets if not _is_sports_market(sm)]
+
+        live_reserved = max(5, int(self._config.max_tracked * 0.20))
+        futures_reserved = max(3, int(self._config.max_tracked * 0.10))
+
+        live_fill = min(live_reserved, len(live_sports))
+        futures_fill = min(futures_reserved, len(futures_sports))
+        general_slots = self._config.max_tracked - live_fill - futures_fill
+
         new_tracked: dict[str, ScoredMarket] = {}
 
-        for sm in sorted_markets[:self._config.max_tracked]:
+        def _add(sm: ScoredMarket, tag: str) -> None:
             mid = sm.market_id
+            if mid in new_tracked:
+                return
+            if mid in self._tracked:
+                new_tracked[mid] = sm
+                retained.append(mid)
+            else:
+                new_tracked[mid] = sm
+                added.append(mid)
+                self._log_change(now, mid, "added", f"score={sm.score:.4f} ({tag})", sm.score)
+
+        # Fill live sports first (highest priority)
+        for sm in live_sports[:live_fill]:
+            _add(sm, "live_sports")
+
+        # Then futures sports
+        for sm in futures_sports[:futures_fill]:
+            _add(sm, "futures_sports")
+
+        # Fill remaining general slots
+        for sm in general_sorted[:general_slots]:
+            mid = sm.market_id
+            if mid in new_tracked:
+                continue
             if mid in self._tracked:
                 new_tracked[mid] = sm
                 retained.append(mid)
@@ -115,7 +153,7 @@ class WatchlistManager:
             elif len(new_tracked) < self._config.max_tracked:
                 new_tracked[mid] = sm
                 added.append(mid)
-                self._log_change(now, mid, "added", f"score={sm.score:.4f} (no cooldown block)", sm.score)
+                self._log_change(now, mid, "added", f"score={sm.score:.4f} (backfill)", sm.score)
 
         for mid in self._tracked:
             if mid not in new_tracked:
@@ -219,3 +257,24 @@ class WatchlistManager:
             reason=reason,
             score=round(score, 4),
         )
+
+
+def _is_live_sports(sm: ScoredMarket) -> bool:
+    """KXMVESPORTS markets are Kalshi's live sports parlays."""
+    mid = sm.market_id or ""
+    return mid.startswith("KXMVESPORTS")
+
+
+def _is_futures_sports(sm: ScoredMarket) -> bool:
+    """Standalone sports futures (NFL, NCAAF, NBA, NHL, etc)."""
+    if _is_live_sports(sm):
+        return False
+    cat = (getattr(sm.market, "category", "") or "").lower()
+    if cat == "sports":
+        return True
+    mid = sm.market_id or ""
+    return any(mid.startswith(p) for p in ("KXNCAAF", "KXNFL", "KXNBA", "KXNHL", "KXMLB", "KXUFC"))
+
+
+def _is_sports_market(sm: ScoredMarket) -> bool:
+    return _is_live_sports(sm) or _is_futures_sports(sm)

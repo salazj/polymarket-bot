@@ -18,7 +18,7 @@ import click
 
 from app.config.settings import Settings, get_settings
 from app.data.features import FeatureEngine
-from app.data.models import Market, MarketFeatures, Order, Side, Signal, Trade, TradingMode
+from app.data.models import Market, MarketFeatures, Order, Side, Signal, SignalAction, Trade, TradingMode
 from app.utils.helpers import generate_order_id
 from app.data.orderbook import OrderbookManager
 from app.decision.engine import DecisionEngine, signal_to_normalized
@@ -72,6 +72,9 @@ class TradingBot:
         # Shared components
         self._portfolio = PortfolioTracker(self._settings)
         self._repository = Repository(self._settings.database_url)
+
+        # Sports data provider reference (set during _build_provider if configured)
+        self._sports_provider: SportsDataProvider | None = None
 
         # NLP pipeline + news ingestion (shared across asset classes)
         self._nlp_pipeline = self._build_nlp_pipeline()
@@ -132,8 +135,8 @@ class TradingBot:
 
         self._news_service.set_market_provider(lambda: self._active_markets)
 
-        # Sports data provider reference (set during _build_provider if configured)
-        self._sports_provider: SportsDataProvider | None = None
+        # _sports_provider is set by _build_provider() during _setup_nlp_providers()
+        # which runs in __init__ before _init_prediction_markets().
 
         # LLM Market Analyzers — GPT and Claude probability assessment
         self._llm_analyzer: LLMMarketAnalyzer | None = None
@@ -1267,6 +1270,20 @@ class TradingBot:
     # ── Core Loops ─────────────────────────────────────────────────────
 
     async def _intelligence_loop(self) -> None:
+        import time as _t
+
+        # Per-MARKET cooldowns (not per-instrument) so buying YES also
+        # blocks the NO side of the same market.
+        market_cooldowns: dict[str, float] = {}
+        # Track how many orders placed per market this session to hard-cap.
+        market_order_count: dict[str, int] = {}
+        # Track which side we chose per market so we don't bet both sides.
+        market_side_chosen: dict[str, str] = {}  # market_id -> "yes" | "no"
+
+        _COOLDOWN_SECONDS = 1800.0   # 30 min between orders on same market
+        _MAX_ORDERS_PER_MARKET = 3   # hard cap per session
+        _last_sports_refresh = 0.0
+
         while self._running:
             await asyncio.sleep(5.0)
 
@@ -1276,6 +1293,19 @@ class TradingBot:
 
             pending_nlp = self._news_service.get_latest_signals()
             pending_nlp.extend(self._llm_analysis_signals)
+
+            _now = _t.monotonic()
+
+            # Keep sports context fresh for odds-based signals (once per 60s)
+            if (
+                self._sports_context
+                and self._sports_provider
+                and (_now - _last_sports_refresh) > 60.0
+            ):
+                raw_events = self._sports_provider.events_cache
+                if raw_events:
+                    self._sports_context.update(raw_events)
+                _last_sports_refresh = _now
 
             for iid, engine in self._feature_engines.items():
                 try:
@@ -1290,6 +1320,43 @@ class TradingBot:
 
                     market = self._instrument_to_market.get(iid)
                     market_id = market.market_id if market else features.market_id
+                    is_no_side = iid.endswith("-no")
+
+                    # ── Market-level cooldown (blocks BOTH sides) ──
+                    if market_id in market_cooldowns:
+                        elapsed = _now - market_cooldowns[market_id]
+                        if elapsed < _COOLDOWN_SECONDS:
+                            continue
+
+                    # ── Hard cap: stop after N orders on same market ──
+                    if market_order_count.get(market_id, 0) >= _MAX_ORDERS_PER_MARKET:
+                        continue
+
+                    # ── Side consistency: don't bet both YES and NO ──
+                    prev_side = market_side_chosen.get(market_id)
+                    current_side = "no" if is_no_side else "yes"
+                    if prev_side is not None and prev_side != current_side:
+                        continue
+
+                    # ── Position awareness ──
+                    held_position = None
+                    held_size = 0.0
+                    for pos in portfolio_snap.positions:
+                        if pos.instrument_id == iid or pos.token_id == iid:
+                            held_position = pos
+                            held_size = pos.size
+                            break
+
+                    # Also check the other side for this market
+                    other_iid = market_id if is_no_side else f"{market_id}-no"
+                    other_held = 0.0
+                    for pos in portfolio_snap.positions:
+                        if pos.instrument_id == other_iid or pos.token_id == other_iid:
+                            other_held = pos.size
+                            break
+
+                    has_position = (held_position is not None and held_size > 0) or other_held > 0
+                    total_market_exposure = held_size + other_held
 
                     # ── Level 1: Rule strategies ──
                     l1_signals: list[NormalizedSignal] = []
@@ -1325,6 +1392,34 @@ class TradingBot:
                                 nlp_signal_to_layered(nlp_sig, instrument_id=iid, exchange=self._settings.exchange)
                             )
 
+                    # ── Sports odds signal from BetStack ──
+                    if self._sports_context is not None and market is not None:
+                        cat = (getattr(market, "category", "") or "").lower()
+                        if cat == "sports" or market_id.startswith("KXMVESPORTS"):
+                            yes_price = features.mid_price or 0.50
+                            odds_sig = self._sports_context.generate_signal_for_market(
+                                market_id, market.question, yes_price,
+                            )
+                            if odds_sig is not None:
+                                action = (
+                                    SignalAction.BUY_YES if odds_sig["direction"] > 0
+                                    else SignalAction.SELL_YES
+                                )
+                                l3_signals.append(NormalizedSignal(
+                                    layer=IntelligenceLayer.NLP,
+                                    source_name="sports_odds",
+                                    market_id=market_id,
+                                    instrument_id=iid,
+                                    exchange=self._settings.exchange,
+                                    action=action,
+                                    direction=odds_sig["direction"],
+                                    raw_confidence=odds_sig["confidence"],
+                                    normalized_confidence=odds_sig["confidence"],
+                                    expected_edge=odds_sig["edge"],
+                                    rationale=odds_sig["rationale"],
+                                    features_used=["sportsbook_consensus", "kalshi_price"],
+                                ))
+
                     # ── Decision Engine ──
                     candidate, trace = self._decision_engine.evaluate(
                         market_id=market_id,
@@ -1356,6 +1451,49 @@ class TradingBot:
                     if candidate.blocked or candidate.action.value == "HOLD":
                         continue
 
+                    # ── Position-aware gating ──
+                    is_buy = candidate.action in (
+                        SignalAction.BUY_YES, SignalAction.BUY_NO,
+                    )
+                    is_sell = candidate.action in (
+                        SignalAction.SELL_YES, SignalAction.SELL_NO,
+                    )
+
+                    max_per_market = self._settings.max_position_per_market
+                    if has_position and is_buy:
+                        if total_market_exposure >= max_per_market:
+                            logger.info(
+                                "position_already_maxed",
+                                instrument_id=iid,
+                                market_id=market_id,
+                                exposure=total_market_exposure,
+                                max=max_per_market,
+                            )
+                            market_cooldowns[market_id] = _now
+                            continue
+
+                        if candidate.final_confidence < 0.55:
+                            logger.info(
+                                "skip_add_low_confidence",
+                                instrument_id=iid,
+                                market_id=market_id,
+                                exposure=total_market_exposure,
+                                confidence=round(candidate.final_confidence, 3),
+                            )
+                            market_cooldowns[market_id] = _now
+                            continue
+
+                    if has_position and is_sell:
+                        if held_position and held_position.unrealized_pnl >= 0 and candidate.final_confidence < 0.65:
+                            logger.info(
+                                "skip_sell_profitable",
+                                instrument_id=iid,
+                                pnl=round(held_position.unrealized_pnl, 4),
+                                confidence=round(candidate.final_confidence, 3),
+                            )
+                            market_cooldowns[market_id] = _now
+                            continue
+
                     exec_signal = Signal(
                         strategy_name="decision_engine",
                         market_id=candidate.market_id,
@@ -1373,6 +1511,17 @@ class TradingBot:
                     )
                     if order is not None:
                         await self._repository.save_order(order)
+                        market_cooldowns[market_id] = _now
+                        market_order_count[market_id] = market_order_count.get(market_id, 0) + 1
+                        market_side_chosen[market_id] = current_side
+                        logger.info(
+                            "order_placed_with_guard",
+                            market_id=market_id,
+                            instrument_id=iid,
+                            side=current_side,
+                            session_orders=market_order_count[market_id],
+                            cooldown_until=f"{_COOLDOWN_SECONDS/60:.0f}min",
+                        )
 
                 except Exception as e:
                     logger.error("intelligence_loop_error", instrument_id=iid, error=str(e))

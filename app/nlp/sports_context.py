@@ -140,14 +140,87 @@ _TEAM_ALIASES: dict[str, list[str]] = {
     "panthers_nhl": ["florida panthers"],
 }
 
+_CITY_ALIASES: dict[str, str] = {
+    "golden state": "warriors",
+    "boston": "celtics",
+    "atlanta": "hawks",
+    "chicago": "bulls",
+    "cleveland": "cavaliers",
+    "dallas": "mavericks",
+    "denver": "nuggets",
+    "detroit": "pistons",
+    "houston": "rockets",
+    "indiana": "pacers",
+    "memphis": "grizzlies",
+    "miami": "heat",
+    "milwaukee": "bucks",
+    "minnesota": "timberwolves",
+    "new orleans": "pelicans",
+    "new york": "knicks",
+    "oklahoma city": "thunder",
+    "orlando": "magic",
+    "philadelphia": "76ers",
+    "phoenix": "suns",
+    "portland": "blazers",
+    "sacramento": "kings",
+    "san antonio": "spurs",
+    "toronto": "raptors",
+    "utah": "jazz",
+    "washington": "wizards",
+    "charlotte": "hornets",
+    "brooklyn": "nets",
+    "los angeles": "lakers",
+    "la lakers": "lakers",
+    "la clippers": "clippers",
+    # NFL city aliases
+    "kansas city": "chiefs",
+    "green bay": "packers",
+    "tampa bay": "buccaneers",
+    "las vegas": "raiders",
+    "jacksonville": "jaguars",
+    "indianapolis": "colts",
+    "tennessee": "titans",
+    "carolina": "panthers",
+    "seattle": "seahawks",
+    "san francisco": "49ers",
+    "baltimore": "ravens",
+    "cincinnati": "bengals",
+    "pittsburgh": "steelers",
+    "buffalo": "bills",
+    "arizona": "cardinals",
+    # NHL city aliases
+    "new jersey": "devils",
+    "nj devils": "devils",
+    "tampa bay lightning": "lightning",
+    "edmonton": "oilers",
+    "calgary": "flames",
+    "vancouver": "canucks",
+    "colorado": "avalanche",
+    "nashville": "predators",
+    "winnipeg": "jets_nhl",
+    "ottawa": "senators",
+    "columbus": "blue jackets",
+    "florida": "panthers_nhl",
+    "anaheim": "ducks",
+    "san jose": "sharks",
+    "vegas": "golden knights",
+    "montreal": "canadiens",
+}
+
 _REVERSE_ALIAS: dict[str, str] = {}
 for _canonical, _aliases in _TEAM_ALIASES.items():
     _REVERSE_ALIAS[_canonical] = _canonical
     for _alias in _aliases:
         _REVERSE_ALIAS[_alias] = _canonical
 
+for _city, _canonical in _CITY_ALIASES.items():
+    if _city not in _REVERSE_ALIAS:
+        _REVERSE_ALIAS[_city] = _canonical
 
-def _normalize(text: str) -> str:
+
+def _normalize(text: str | Any) -> str:
+    if not isinstance(text, str):
+        text = str(text)
     return re.sub(r"[^a-z0-9\s]", "", text.lower()).strip()
 
 
@@ -198,6 +271,14 @@ class SportsContextCache:
         for raw in raw_events:
             home = raw.get("home_team", "")
             away = raw.get("away_team", "")
+            if isinstance(home, dict):
+                home = home.get("name", "") or ""
+            if isinstance(away, dict):
+                away = away.get("name", "") or ""
+            if not isinstance(home, str):
+                home = str(home) if home else ""
+            if not isinstance(away, str):
+                away = str(away) if away else ""
             if not home or not away:
                 continue
 
@@ -330,6 +411,129 @@ class SportsContextCache:
                         )
 
         return "\n".join(lines)
+
+    def generate_signal_for_market(
+        self,
+        market_id: str,
+        question: str,
+        yes_price: float,
+    ) -> dict[str, Any] | None:
+        """Create a directional signal from sportsbook odds vs Kalshi price.
+
+        Returns a dict with direction (+1 buy, -1 sell), confidence, and
+        rationale — or None if no match or no actionable edge exists.
+        """
+        ctx = self.find_context(question, yes_price)
+        if ctx is None:
+            return None
+
+        ev = ctx.event
+
+        from app.nlp.providers.sports_data import moneyline_to_probability
+
+        ml_home = None
+        ml_away = None
+        if ev.odds:
+            ml_home = ev.odds.get("money_line_home") or ev.odds.get("moneyline_home")
+            ml_away = ev.odds.get("money_line_away") or ev.odds.get("moneyline_away")
+
+        if ml_home is None or ml_away is None:
+            # No moneyline odds — generate a BUY signal if we matched
+            # a real event. Default to BUY since the bot needs to enter
+            # a position before it can sell.
+            direction = 1
+            confidence = 0.35 if ev.is_live else 0.30
+            rationale = f"Matched event: {ev.away_team} @ {ev.home_team}"
+            if ev.is_live and ev.home_score is not None and ev.away_score is not None:
+                rationale += f" [LIVE {ev.home_team} {ev.home_score}-{ev.away_score} {ev.away_team}]"
+                confidence = 0.40
+            logger.info(
+                "sports_odds_signal",
+                market_id=market_id,
+                direction="BUY" if direction > 0 else "SELL",
+                confidence=round(confidence, 3),
+                edge_pp=0.0,
+                consensus=0.0,
+                kalshi_price=round(yes_price, 3),
+                live=ev.is_live,
+            )
+            return {
+                "direction": direction,
+                "confidence": confidence,
+                "rationale": rationale,
+                "edge": 0.0,
+                "consensus_prob": 0.0,
+                "is_live": ev.is_live,
+            }
+
+        home_prob = moneyline_to_probability(ml_home)
+        away_prob = moneyline_to_probability(ml_away)
+
+        q_lower = question.lower()
+        home_lower = ev.home_team.lower()
+        away_lower = ev.away_team.lower()
+
+        # Determine which team/outcome the market references
+        consensus_prob: float | None = None
+        if home_lower in q_lower or any(
+            alias in q_lower
+            for alias in _REVERSE_ALIAS
+            if _REVERSE_ALIAS.get(alias) in _extract_team_tokens(home_lower)
+        ):
+            consensus_prob = home_prob
+        elif away_lower in q_lower or any(
+            alias in q_lower
+            for alias in _REVERSE_ALIAS
+            if _REVERSE_ALIAS.get(alias) in _extract_team_tokens(away_lower)
+        ):
+            consensus_prob = away_prob
+
+        if consensus_prob is None:
+            best_prob = max(home_prob, away_prob)
+            consensus_prob = best_prob
+
+        if yes_price <= 0:
+            yes_price = 0.50
+
+        edge = consensus_prob - yes_price
+        abs_edge = abs(edge)
+
+        if abs_edge < 0.05:
+            return None
+
+        direction = 1 if edge > 0 else -1
+        confidence = min(0.85, 0.30 + abs_edge * 2.0)
+
+        if ev.is_live:
+            confidence = min(0.90, confidence + 0.10)
+
+        rationale = (
+            f"Sportsbook consensus: {consensus_prob*100:.0f}% vs Kalshi {yes_price*100:.0f}% "
+            f"({abs_edge*100:.0f}pp edge). "
+            f"{ev.away_team} @ {ev.home_team}"
+        )
+        if ev.is_live and ev.home_score is not None:
+            rationale += f" [LIVE {ev.home_team} {ev.home_score}-{ev.away_score} {ev.away_team}]"
+
+        logger.info(
+            "sports_odds_signal",
+            market_id=market_id,
+            direction="BUY" if direction > 0 else "SELL",
+            confidence=round(confidence, 3),
+            edge_pp=round(abs_edge * 100, 1),
+            consensus=round(consensus_prob, 3),
+            kalshi_price=round(yes_price, 3),
+            live=ev.is_live,
+        )
+
+        return {
+            "direction": direction,
+            "confidence": confidence,
+            "rationale": rationale,
+            "edge": edge,
+            "consensus_prob": consensus_prob,
+            "is_live": ev.is_live,
+        }
 
     @property
     def event_count(self) -> int:

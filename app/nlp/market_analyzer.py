@@ -88,7 +88,14 @@ def _passes_cost_gate(
     Rule: the position size must be large enough that a reasonable edge
     (5%) would earn more than `cost_multiplier` times the API call cost.
     Also enforces a hard minimum bet size.
+
+    Sports markets always pass — they depend entirely on LLM intelligence.
     """
+    cat = (getattr(market, "category", "") or "").lower()
+    mid = market.market_id or ""
+    if cat == "sports" or mid.startswith("KXMVESPORTS"):
+        return True
+
     ed = market.exchange_data or {}
     price = ed.get("yes_price")
     if price is None or price <= 0:
@@ -263,9 +270,11 @@ class LLMMarketAnalyzer:
         signals: list[NlpSignal] = []
         headlines = news_headlines or []
 
+        import asyncio as _aio
         candidates = self._select_candidates(markets)
         self.cache.evict_stale()
 
+        calls_made = 0
         for market in candidates:
             ed = market.exchange_data or {}
             yes_price = ed.get("yes_price", 0)
@@ -285,9 +294,22 @@ class LLMMarketAnalyzer:
                         signals.append(sig)
                 continue
 
+            if calls_made > 0:
+                await _aio.sleep(2.0)
+
             try:
                 analysis = await self._analyze_single(market, headlines)
+                calls_made += 1
                 self.cache.put(market.market_id, yes_price, analysis)
+                if analysis:
+                    logger.info(
+                        "llm_analysis_result",
+                        market_id=market.market_id,
+                        direction=analysis.direction,
+                        confidence=round(analysis.confidence, 3),
+                        edge=round(analysis.edge, 3),
+                        question=market.question[:60],
+                    )
                 if analysis and analysis.direction != "hold":
                     sig = self._analysis_to_signal(analysis, market)
                     if sig:
@@ -308,9 +330,20 @@ class LLMMarketAnalyzer:
         return signals
 
     def _select_candidates(self, markets: list[Market]) -> list[Market]:
-        """Pick the most promising markets to analyze (save API calls)."""
+        """Pick the most promising markets to analyze (save API calls).
+
+        Sports markets always qualify — their value comes from LLM analysis,
+        not from volume or price data.
+        """
+        sports: list[Market] = []
         scored: list[tuple[float, Market]] = []
         for m in markets:
+            cat = (getattr(m, "category", "") or "").lower()
+            mid = m.market_id or ""
+            if cat == "sports" or mid.startswith("KXMVESPORTS"):
+                sports.append(m)
+                continue
+
             ed = m.exchange_data or {}
             price = ed.get("yes_price")
             volume = float(ed.get("volume", 0) or 0)
@@ -318,14 +351,14 @@ class LLMMarketAnalyzer:
                 continue
             if volume < 50:
                 continue
-            # Prefer markets in the 0.20-0.80 range with decent volume
             price_quality = 1.0 - abs(price - 0.50) * 2
             vol_score = min(volume / 500.0, 1.0)
             score = price_quality * 0.6 + vol_score * 0.4
             scored.append((score, m))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [m for _, m in scored[: self._max_markets]]
+        general = [m for _, m in scored[: max(1, self._max_markets - len(sports))]]
+        return sports + general
 
     async def _analyze_single(
         self,
@@ -335,7 +368,11 @@ class LLMMarketAnalyzer:
         ed = market.exchange_data or {}
         yes_price = ed.get("yes_price")
         if yes_price is None or yes_price <= 0:
-            return None
+            cat = (getattr(market, "category", "") or "").lower()
+            mid = market.market_id or ""
+            if cat != "sports" and not mid.startswith("KXMVESPORTS"):
+                return None
+            yes_price = 0.50
 
         question = _extract_question(market)
         if not question:
@@ -550,9 +587,11 @@ class ClaudeMarketAnalyzer:
         signals: list[NlpSignal] = []
         headlines = news_headlines or []
 
+        import asyncio as _aio
         candidates = self._select_candidates(markets)
         self.cache.evict_stale()
 
+        calls_made = 0
         for market in candidates:
             ed = market.exchange_data or {}
             yes_price = ed.get("yes_price", 0)
@@ -572,9 +611,22 @@ class ClaudeMarketAnalyzer:
                         signals.append(sig)
                 continue
 
+            if calls_made > 0:
+                await _aio.sleep(2.0)
+
             try:
                 analysis = await self._analyze_single(market, headlines)
+                calls_made += 1
                 self.cache.put(market.market_id, yes_price, analysis)
+                if analysis:
+                    logger.info(
+                        "claude_analysis_result",
+                        market_id=market.market_id,
+                        direction=analysis.direction,
+                        confidence=round(analysis.confidence, 3),
+                        edge=round(analysis.edge, 3),
+                        question=market.question[:60],
+                    )
                 if analysis and analysis.direction != "hold":
                     sig = self._analysis_to_signal(analysis, market)
                     if sig:
@@ -595,8 +647,15 @@ class ClaudeMarketAnalyzer:
         return signals
 
     def _select_candidates(self, markets: list[Market]) -> list[Market]:
+        sports: list[Market] = []
         scored: list[tuple[float, Market]] = []
         for m in markets:
+            cat = (getattr(m, "category", "") or "").lower()
+            mid = m.market_id or ""
+            if cat == "sports" or mid.startswith("KXMVESPORTS"):
+                sports.append(m)
+                continue
+
             ed = m.exchange_data or {}
             price = ed.get("yes_price")
             volume = float(ed.get("volume", 0) or 0)
@@ -610,7 +669,8 @@ class ClaudeMarketAnalyzer:
             scored.append((score, m))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [m for _, m in scored[: self._max_markets]]
+        general = [m for _, m in scored[: max(1, self._max_markets - len(sports))]]
+        return sports + general
 
     async def _analyze_single(
         self,
@@ -620,7 +680,11 @@ class ClaudeMarketAnalyzer:
         ed = market.exchange_data or {}
         yes_price = ed.get("yes_price")
         if yes_price is None or yes_price <= 0:
-            return None
+            cat = (getattr(market, "category", "") or "").lower()
+            mid = market.market_id or ""
+            if cat != "sports" and not mid.startswith("KXMVESPORTS"):
+                return None
+            yes_price = 0.50
 
         question = _extract_question(market)
         if not question:
